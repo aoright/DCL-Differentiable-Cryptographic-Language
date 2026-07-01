@@ -1,0 +1,35 @@
+{
+  "name": "dcl-vscode",
+  "displayName": "DCL Language Support",
+  "description": "Syntax highlighting and language configurations for the Differentiable Cryptographic Language (DCL)",
+  "version": "0.1.0",
+  "publisher": "dcl-community",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "dcl",
+        "aliases": [
+          "DCL",
+          "dcl"
+        ],
+        "extensions": [
+          ".dcl"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "dcl",
+        "scopeName": "source.dcl",
+        "path": "./syntaxes/dcl.tmLanguage.json"
+      }
+    ]
+  }
+}

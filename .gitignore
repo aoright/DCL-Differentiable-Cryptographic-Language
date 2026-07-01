@@ -1,0 +1,25 @@
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# IDE and Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Rust / Cargo
+**/target/
+Cargo.bak
+
+# Python / JAX
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+.pytest_cache/
+.ipynb_checkpoints/
+**/.venv/
+**/venv/
+**/env/
+.env

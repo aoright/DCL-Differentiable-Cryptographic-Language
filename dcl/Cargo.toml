@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/dcl-frontend",
+    "crates/dcl-ir",
+    "crates/dcl-codegen",
+    "crates/dcl-cli",
+]
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+clap = { version = "4.4", features = ["derive"] }
+num-bigint = { version = "0.4", features = ["serde"] }
+num-traits = "0.2"

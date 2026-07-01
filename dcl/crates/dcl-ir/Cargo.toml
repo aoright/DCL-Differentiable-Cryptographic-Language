@@ -1,0 +1,11 @@
+[package]
+name = "dcl-ir"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+dcl-frontend = { path = "../dcl-frontend" }
+num-bigint = { workspace = true }
+num-traits = { workspace = true }

@@ -1,0 +1,106 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "DCL",
+  "scopeName": "source.dcl",
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#types"
+    },
+    {
+      "include": "#constants"
+    },
+    {
+      "include": "#operators"
+    },
+    {
+      "include": "#strings"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.dcl",
+          "match": "//.*$"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.dcl",
+          "match": "\\b(module|type|circuit|let|assert|return|for|in|if|else|use|extern)\\b"
+        },
+        {
+          "name": "storage.modifier.dcl",
+          "match": "\\b(private|public|shared|mut)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "storage.type.dcl",
+          "match": "\\b(Field|bool)\\b"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.boolean.dcl",
+          "match": "\\b(true|false)\\b"
+        },
+        {
+          "name": "constant.numeric.decimal.dcl",
+          "match": "\\b[0-9]+\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.logical.dcl",
+          "match": "(&&|\\|\\||!)"
+        },
+        {
+          "name": "keyword.operator.comparison.dcl",
+          "match": "(==|!=|>=|<=|<|>)"
+        },
+        {
+          "name": "keyword.operator.assignment.dcl",
+          "match": "="
+        },
+        {
+          "name": "keyword.operator.arithmetic.dcl",
+          "match": "(\\+|-|\\*|/)"
+        },
+        {
+          "name": "keyword.operator.arrow.dcl",
+          "match": "->"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.dcl",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.dcl",
+              "match": "\\\\."
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

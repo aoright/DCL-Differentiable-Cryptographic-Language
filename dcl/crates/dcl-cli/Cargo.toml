@@ -1,0 +1,12 @@
+[package]
+name = "dcl-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+dcl-frontend = { path = "../dcl-frontend" }
+dcl-ir = { path = "../dcl-ir" }
+dcl-codegen = { path = "../dcl-codegen" }
