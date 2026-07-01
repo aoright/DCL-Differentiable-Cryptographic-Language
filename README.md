@@ -1,23 +1,23 @@
-# 🔮 Differentiable Cryptographic Language (DCL)
+# Differentiable Cryptographic Language (DCL)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Rust](https://img.shields.io/badge/Rust-1.70+-orange.svg)](https://www.rust-lang.org/)
 [![Python JAX](https://img.shields.io/badge/Python-JAX-blue.svg)](https://github.com/google/jax)
 
-DCL is an innovative programming language designed for privacy-preserving computations (ZKP / FHE). By embedding **automatic differentiation** directly into the compiler pipeline, DCL compiles high-level math declarations into a **Fully Differentiable Intermediate Representation (DCIR)**. It then utilizes gradient descent to automatically search for circuit structures that minimize R1CS constraints or homomorphic encryption (FHE) noise growth.
+DCL is an innovative programming language designed for privacy-preserving computations (ZKP / FHE). By embedding automatic differentiation directly into the compiler pipeline, DCL compiles high-level math declarations into a Fully Differentiable Intermediate Representation (DCIR). It then utilizes gradient descent to automatically search for circuit structures that minimize R1CS constraints or homomorphic encryption (FHE) noise growth.
 
 ---
 
-## 🚀 Key Innovations
+## Key Innovations
 
 ### 1. Fully Differentiable Intermediate Representation (DCIR)
-Unlike traditional static compiler intermediate representations, DCIR represents the calculation as a differentiable Directed Acyclic Graph (DAG). Every node contains not only computing semantics but also a set of **learnable continuous relaxation parameters** ($\alpha, \beta, \gamma$) adjusted by the compiler optimizer:
+Unlike traditional static compiler intermediate representations, DCIR represents the calculation as a differentiable Directed Acyclic Graph (DAG). Every node contains not only computing semantics but also a set of learnable continuous relaxation parameters ($\alpha, \beta, \gamma$) adjusted by the compiler optimizer:
 *   $\alpha$: Controls structural strategy selection (e.g., whether to implement a Range Proof via bit decomposition, lookup tables, or polynomial approximations).
 *   $\beta$: Controls precision vs. noise trade-offs in FHE scenarios.
 *   $\gamma$: Controls sub-circuit inlining/folding decisions.
 
 ### 2. Differentiable Optimizer Engine
-The optimization passes of traditional compilers (heuristics, greedy matching) are replaced with a continuous **Loss Function Minimization + Gradient Descent** loop:
+The optimization passes of traditional compilers (heuristics, greedy matching) are replaced with a continuous Loss Function Minimization + Gradient Descent loop:
 
 $$\mathcal{L}_{\text{total}} = w_1 \cdot \mathcal{L}_{\text{constraints}} + w_2 \cdot \mathcal{L}_{\text{noise}} + w_3 \cdot \mathcal{L}_{\text{depth}} + w_4 \cdot \mathcal{L}_{\text{correctness}}$$
 
@@ -27,11 +27,11 @@ $$\mathcal{L}_{\text{total}} = w_1 \cdot \mathcal{L}_{\text{constraints}} + w_2 
 *   $\mathcal{L}_{\text{correctness}}$: Enforces mathematical equivalence between the optimized circuit and the original program through SMT/random verification checks.
 
 ### 3. Differentiable Discrete Choice (Gumbel-Softmax)
-DCL uses the **Gumbel-Softmax** trick to make discrete compiler decisions (such as picking a Range Proof algorithm) fully differentiable. Over epochs, a temperature parameter $\tau$ is annealed to 0, smoothly moving from a soft probability distribution of strategies to a concrete, optimized hard-gate execution path.
+DCL uses the Gumbel-Softmax trick to make discrete compiler decisions (such as picking a Range Proof algorithm) fully differentiable. Over epochs, a temperature parameter $\tau$ is annealed to 0, smoothly moving from a soft probability distribution of strategies to a concrete, optimized hard-gate execution path.
 
 ---
 
-## 📂 Project Structure
+## Project Structure
 
 The repository is organized as follows:
 
@@ -61,7 +61,7 @@ DCL-Differentiable-Cryptographic-Language/
 
 ---
 
-## 📝 Syntax Example
+## Syntax Example
 
 Developers write mathematical logic and privacy constraints. The compiler automatically translates and optimizes the layout.
 
@@ -92,7 +92,7 @@ circuit verify_adult(
 
 ---
 
-## ⚡ Quick Start (Phase 0 PoC)
+## Quick Start (Phase 0 PoC)
 
 To verify the core hypothesis that gradient descent can find circuit configurations with fewer constraints than traditional compiler optimizers:
 
@@ -116,15 +116,15 @@ To verify the core hypothesis that gradient descent can find circuit configurati
 
 ---
 
-## 🗺️ Development Roadmap
+## Development Roadmap
 
-*   **Phase 0: Proof of Concept (PoC)** *(Current)*: Validate the gradient-based optimization on JAX benchmarks. Prove advantages over static heuristics (e.g., Circom `--O2`).
+*   **Phase 0: Proof of Concept (PoC)** (Current): Validate the gradient-based optimization on JAX benchmarks. Prove advantages over static heuristics (e.g., Circom --O2).
 *   **Phase 1: Language Frontend**: Freeze syntax specs. Complete Rust lexer, parser, type checker, and lowering to AST.
 *   **Phase 2: Compiler Core**: Implement Rust autograd engine, Gumbel-Softmax discretization, Adam optimization pass, and equivalence verification with SMT solvers.
 *   **Phase 3: Backends & Ecosystem**: Target R1CS (arkworks), ACIR (Noir compatibility), and TFHE-rs (FHE). Deliver VS Code syntax highlighter and complete CLI tooling.
 
 ---
 
-## 📄 License
+## License
 
 This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.

@@ -11,6 +11,7 @@ Thumbs.db
 # Rust / Cargo
 **/target/
 Cargo.bak
+dcl/examples/build_e2e/
 
 # Python / JAX
 **/__pycache__/
