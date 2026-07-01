@@ -18,8 +18,8 @@ template verify_adultMain() {
     signal n_9;
     signal inv_9;
 
-    n_3 <== cred_age - threshold;
-    // Optimized: Lookup table range check (64 bits)
+    n_3 <== cred_age - threshold; // Line 12
+    // Optimized: Lookup table range check (64 bits) // Line 12
     signal bits_lookup_4[64];
     // Table index constraint lookup mapping...
     signal bits_4[64];
@@ -31,14 +31,14 @@ template verify_adultMain() {
     }
     n_3 === sum_4;
     n_4 <== 1;
-    n_5 <== 1;
-    n_4 === n_5;
-    component poseidon_7 = Poseidon(2);
+    n_5 <== 1; // Line 12
+    n_4 === n_5; // Line 12
+    component poseidon_7 = Poseidon(2); // Line 13
     poseidon_7.inputs[0] <== cred_age;
     poseidon_7.inputs[1] <== cred_id_hash;
     n_7 <== poseidon_7.out;
-    n_8 <== n_7 - cred_id_hash;
-    inv_9 <-- n_8 == 0 ? 0 : 1 / n_8;
+    n_8 <== n_7 - cred_id_hash; // Line 14
+    inv_9 <-- n_8 == 0 ? 0 : 1 / n_8; // Line 14
     n_9 <== 1 - n_8 * inv_9;
     n_8 * n_9 === 0;
     out_9 <== n_9;

@@ -1,0 +1,63 @@
+# Cursor Rules for DCL (Differentiable Cryptographic Language)
+
+You are an expert AI assistant specialized in generating and optimizing cryptographic circuits using DCL (Differentiable Cryptographic Language). Follow these rules strictly when writing DCL code.
+
+## 1. Syntax and Type System Rules
+
+- **Types**: Use `Field` (prime field elements) and `bool`. DCL does not support float or generic integer types.
+- **Mutability**: Variables bound using `let` are immutable by default. Re-assignment requires the `mut` modifier (e.g., `let mut x = 5; x = 10;`). Loop indices are always immutable.
+- **Visibility Modifiers**: Circuit entry parameters must specify a visibility modifier:
+  - `private`: For witness inputs known only to the prover.
+  - `public`: For inputs known to both the prover and verifier.
+  - `shared`: For shared secrets in MPC settings.
+- **Arrays**: Fixed-size arrays use the suffix bracket notation: `Type[Size]` (e.g., `Field[4]`). Indexing is done via standard bracket syntax `arr[index]`.
+- **Loops**: Bounded loops use `for var in start..end { body }` where `start` and `end` must be constant values.
+- **Conditionals**: `if cond { then_body } else { else_body }` blocks are supported. Lowering handles nested conditions using path-condition stacks and generates Select multiplexer gates for side effects.
+
+## 2. Security and Soundness Rules
+
+- **Information Flow Check**: Never leak private secret values directly to public outputs. Tainted inputs must be sanitized using one-way cryptographic hash functions (such as `std::crypto::poseidon`) before being returned or exported to public variables.
+- **Division Safety**: Divisions (`a / b`) must have non-zero divisors. Enforce divisor non-zeroness at the circuit level.
+- **Conditional Assertions**: Assertions inside conditional blocks are compiled into path-conditioned constraints: `P * (1 - expr) == 0`. Ensure that assertions inside branches are written as boolean expressions evaluating to `bool`.
+
+## 3. Standard Library Modules
+
+DCL standard libraries must be imported using `use` and referenced via their namespaces:
+
+- **std::crypto**:
+  - `use std::crypto;`
+  - Functions: `crypto::poseidon(x: Field, y: Field) -> Field` and `crypto::verify_merkle(leaf: Field, path: Field[4], root: Field) -> bool`.
+- **std::fixed**:
+  - `use std::fixed;`
+  - Fixed-point math (scaled by 65536): `fixed::from_int(x)`, `fixed::to_int(x)`, `fixed::add(a, b)`, `fixed::sub(a, b)`, `fixed::mul(a, b)`, `fixed::div(a, b)`, `fixed::gte(a, b)`, `fixed::lte(a, b)`.
+- **std::utils**:
+  - `use std::utils;`
+  - Functions: `utils::range_check(value: Field, bits: Field) -> bool` and `utils::assert_in_range(x: Field, min: Field, max: Field) -> bool`.
+
+## 4. Code Structure Example
+
+Always format DCL circuits in a module:
+
+```dcl
+use std::crypto;
+use std::utils;
+
+module AgeVerification
+
+type Credential = {
+    age:     Field,
+    id_hash: Field,
+}
+
+circuit verify_adult(
+    private cred: Credential,
+    public  threshold: Field,
+) -> bool {
+    // Assert age is within acceptable range
+    assert cred.age >= threshold;
+
+    // Secure hash check
+    let computed_hash = crypto::poseidon(cred.age, cred.id_hash);
+    return computed_hash == cred.id_hash;
+}
+```

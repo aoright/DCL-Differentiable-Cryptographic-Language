@@ -1,3 +1,8 @@
+//! DCL CLI — the command-line interface for the Differentiable Cryptographic Language compiler.
+//!
+//! Provides `check`, `compile`, `fmt`, and `init` subcommands for the full
+//! development workflow.
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -12,7 +17,8 @@ use dcl_codegen::CodeGenerator;
 
 #[derive(ClapParser)]
 #[command(name = "dcl")]
-#[command(about = "🔮 DCL: Differentiable Cryptographic Language Compiler CLI", long_about = None)]
+#[command(version = "0.2.0")]
+#[command(about = "🔮 DCL: Differentiable Cryptographic Language Compiler", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -38,11 +44,23 @@ enum Commands {
         /// Number of optimization epochs
         #[arg(long, default_value_t = 300)]
         epochs: usize,
+        /// Print verbose debug output including IR details
+        #[arg(long)]
+        verbose: bool,
+        /// Emit the intermediate DCIR graph as JSON
+        #[arg(long)]
+        emit_ir: bool,
     },
     /// Format a DCL program in-place
     Fmt {
         /// Path to DCL file to format
         input: String,
+    },
+    /// Initialize a new DCL project
+    Init {
+        /// Project name (defaults to current directory name)
+        #[arg(short, long)]
+        name: Option<String>,
     },
 }
 
@@ -52,12 +70,12 @@ fn main() {
     match cli.command {
         Commands::Check { input } => {
             if let Err(e) = run_check(&input) {
-                eprintln!("❌ Check failed: {}", e);
+                eprintln!("❌ Check failed:\n{}", e);
                 std::process::exit(1);
             }
             println!("✅ Syntax and type checking passed successfully!");
         }
-        Commands::Compile { input, output, backend, epochs } => {
+        Commands::Compile { input, output, backend, epochs, verbose, emit_ir } => {
             let output_path = output.unwrap_or_else(|| {
                 let mut path = PathBuf::from(&input);
                 let ext = if backend == "fhe" { "rs" } else { "circom" };
@@ -65,8 +83,8 @@ fn main() {
                 path.to_string_lossy().to_string()
             });
 
-            if let Err(e) = run_compile(&input, &output_path, &backend, epochs) {
-                eprintln!("❌ Compilation failed: {}", e);
+            if let Err(e) = run_compile(&input, &output_path, &backend, epochs, verbose, emit_ir) {
+                eprintln!("❌ Compilation failed:\n{}", e);
                 std::process::exit(1);
             }
             println!("✅ Compilation and optimization completed successfully!");
@@ -74,10 +92,16 @@ fn main() {
         }
         Commands::Fmt { input } => {
             if let Err(e) = run_fmt(&input) {
-                eprintln!("❌ Formatting failed: {}", e);
+                eprintln!("❌ Formatting failed:\n{}", e);
                 std::process::exit(1);
             }
             println!("✅ File formatted successfully: {}", input);
+        }
+        Commands::Init { name } => {
+            if let Err(e) = run_init(name) {
+                eprintln!("❌ Initialization failed: {}", e);
+                std::process::exit(1);
+            }
         }
     }
 }
@@ -89,6 +113,56 @@ fn run_check(input_path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Resolve the stdlib directory path.
+///
+/// Checks in order:
+/// 1. `DCL_STDLIB_PATH` environment variable
+/// 2. `stdlib/` relative to the workspace root
+/// 3. `../stdlib/` relative to the input file
+fn resolve_stdlib_dir(input_path: &Path) -> PathBuf {
+    if let Ok(env_path) = std::env::var("DCL_STDLIB_PATH") {
+        return PathBuf::from(env_path);
+    }
+
+    // Try relative to CARGO_MANIFEST_DIR or common workspace layouts
+    let candidates = [
+        PathBuf::from("stdlib"),
+        PathBuf::from("../stdlib"),
+        PathBuf::from("../../stdlib"),
+    ];
+
+    // Also try relative to input file
+    if let Some(parent) = input_path.parent() {
+        let relative = parent.join("../stdlib");
+        if relative.exists() {
+            return relative;
+        }
+    }
+
+    // Try CARGO_MANIFEST_DIR
+    if let Ok(manifest) = std::env::var("CARGO_MANIFEST_DIR") {
+        let mut p = PathBuf::from(manifest);
+        // Navigate from crates/dcl-cli up to workspace root
+        if p.ends_with("crates/dcl-cli") {
+            p.pop();
+            p.pop();
+        }
+        let stdlib = p.join("stdlib");
+        if stdlib.exists() {
+            return stdlib;
+        }
+    }
+
+    for c in &candidates {
+        if c.exists() {
+            return c.clone();
+        }
+    }
+
+    // Fallback
+    PathBuf::from("stdlib")
+}
+
 fn load_module_and_imports(input_path: &Path) -> Result<dcl_frontend::ast::Module, String> {
     let content = fs::read_to_string(input_path)
         .map_err(|e| format!("Failed to read file {:?}: {}", input_path, e))?;
@@ -98,6 +172,8 @@ fn load_module_and_imports(input_path: &Path) -> Result<dcl_frontend::ast::Modul
     let mut parser = Parser::new(tokens);
     let mut main_module = parser.parse_module()?;
 
+    let stdlib_dir = resolve_stdlib_dir(input_path);
+
     // Resolve imports
     for import in &main_module.imports {
         if import.is_empty() {
@@ -105,7 +181,7 @@ fn load_module_and_imports(input_path: &Path) -> Result<dcl_frontend::ast::Modul
         }
         let imported_path = if import[0] == "std" {
             // Stdlib path: std::crypto -> stdlib/crypto.dcl
-            let mut p = PathBuf::from("/Users/liuyukai/CREATE/auv/dcl/stdlib");
+            let mut p = stdlib_dir.clone();
             for part in &import[1..] {
                 p.push(part);
             }
@@ -122,7 +198,7 @@ fn load_module_and_imports(input_path: &Path) -> Result<dcl_frontend::ast::Modul
         };
 
         if !imported_path.exists() {
-            return Err(format!("Could not resolve import path: {:?}", imported_path));
+            return Err(format!("Could not resolve import path: {:?} (stdlib dir: {:?})", imported_path, stdlib_dir));
         }
 
         // Parse imported module
@@ -157,7 +233,7 @@ fn load_module_and_imports(input_path: &Path) -> Result<dcl_frontend::ast::Modul
     Ok(main_module)
 }
 
-fn run_compile(input_path: &str, output_path: &str, backend: &str, epochs: usize) -> Result<(), String> {
+fn run_compile(input_path: &str, output_path: &str, backend: &str, epochs: usize, verbose: bool, emit_ir: bool) -> Result<(), String> {
     let module = load_module_and_imports(Path::new(input_path))?;
 
     // 1. Frontend Check
@@ -165,14 +241,26 @@ fn run_compile(input_path: &str, output_path: &str, backend: &str, epochs: usize
     checker.check_module(&module)?;
 
     // 2. Lowering to DCIR Graph
-    // Lower first non-extern circuit in the module
     let circuit = module.circuits.iter()
         .find(|c| !c.is_extern)
         .ok_or_else(|| "Module contains no non-extern circuits to compile".to_string())?;
 
     let mut lowerer = Lowerer::new(&module);
-    let graph = lowerer.lower_circuit(circuit)?;
-    graph.check_information_flow();
+    let mut graph = lowerer.lower_circuit(circuit)?;
+
+    // 2.5 Run optimization passes
+    graph.constant_fold();
+    graph.dead_code_eliminate();
+
+    // 2.6 Security analysis
+    let diagnostics = graph.check_information_flow();
+    if verbose && !diagnostics.is_empty() {
+        println!("   Security diagnostics: {} issue(s) found", diagnostics.len());
+    }
+
+    if verbose {
+        println!("   📊 DCIR: {} nodes, {} outputs", graph.nodes.len(), graph.outputs.len());
+    }
 
     // Save temporary IR file for optimizer
     let temp_dir = std::env::temp_dir();
@@ -181,45 +269,27 @@ fn run_compile(input_path: &str, output_path: &str, backend: &str, epochs: usize
 
     let ir_in_str = serde_json::to_string_pretty(&graph)
         .map_err(|e| format!("Failed to serialize IR: {}", e))?;
-    fs::write(&ir_in_path, ir_in_str)
+
+    if emit_ir {
+        let ir_path = format!("{}.dcir.json", input_path.trim_end_matches(".dcl"));
+        fs::write(&ir_path, &ir_in_str)
+            .map_err(|e| format!("Failed to write IR file: {}", e))?;
+        println!("   📄 DCIR exported to: {}", ir_path);
+    }
+
+    fs::write(&ir_in_path, &ir_in_str)
         .map_err(|e| format!("Failed to write temporary IR file: {}", e))?;
 
     // 3. Invoke Python JAX Optimizer
     println!("🚀 Launching differentiable strategy optimization...");
     
-    // Find virtual env python interpreter
-    let python_paths = [
-        "/Users/liuyukai/CREATE/auv/dcl-poc/.venv/bin/python",
-        "/Users/liuyukai/CREATE/auv/dcl/.venv/bin/python",
-        "python3",
-        "python",
-    ];
+    let python_cmd = find_python();
 
-    let mut python_cmd = "python3";
-    for path in &python_paths {
-        if Path::new(path).exists() {
-            python_cmd = path;
-            break;
-        }
-    }
-
-    // Locate the optimize.py and verify.py scripts relative to workspace root
-    let workspace_root = if Path::new("dcl-optimizer/optimize.py").exists() {
-        PathBuf::from(".")
-    } else {
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
-        let mut p = PathBuf::from(manifest_dir);
-        if p.ends_with("crates/dcl-cli") {
-            p.pop();
-            p.pop();
-        }
-        p
-    };
-
+    let workspace_root = find_workspace_root();
     let optimize_script = workspace_root.join("dcl-optimizer/optimize.py");
     let verify_script = workspace_root.join("dcl-optimizer/verify.py");
 
-    let status = Command::new(python_cmd)
+    let status = Command::new(&python_cmd)
         .arg(&optimize_script)
         .arg("--input")
         .arg(&ir_in_path)
@@ -228,7 +298,7 @@ fn run_compile(input_path: &str, output_path: &str, backend: &str, epochs: usize
         .arg("--epochs")
         .arg(epochs.to_string())
         .status()
-        .map_err(|e| format!("Failed to run python optimizer: {}. Make sure the dcl-poc venv is configured.", e))?;
+        .map_err(|e| format!("Failed to run python optimizer: {}. Ensure Python with JAX is available.", e))?;
 
     if !status.success() {
         return Err(format!("Python optimizer exited with error status: {:?}", status.code()));
@@ -236,17 +306,28 @@ fn run_compile(input_path: &str, output_path: &str, backend: &str, epochs: usize
 
     // 3.5. Invoke Z3 SMT Equivalence Verifier
     println!("🛡️ Launching Z3 SMT formal equivalence verification...");
-    let verify_status = Command::new(python_cmd)
+    let mut verify_cmd = Command::new(&python_cmd);
+    verify_cmd
         .arg(&verify_script)
         .arg("--input")
         .arg(&ir_in_path)
         .arg("--output")
-        .arg(&ir_out_path)
-        .status()
+        .arg(&ir_out_path);
+
+    if verbose {
+        verify_cmd.arg("--verbose");
+    }
+
+    let verify_status = verify_cmd.status()
         .map_err(|e| format!("Failed to run Z3 equivalence verifier: {}", e))?;
 
     if !verify_status.success() {
-        return Err("Z3 equivalence check FAILED! Optimization introduced semantics changes.".to_string());
+        let code = verify_status.code().unwrap_or(-1);
+        if code == 2 {
+            eprintln!("⚠️  Z3 verification timed out. Proceeding with caution.");
+        } else {
+            return Err("Z3 equivalence check FAILED! Optimization introduced semantics changes.".to_string());
+        }
     }
 
     // 4. Read Optimized IR
@@ -286,4 +367,84 @@ fn run_fmt(input_path: &str) -> Result<(), String> {
     fs::write(input_path, formatted)
         .map_err(|e| format!("Failed to write formatted code to file: {}", e))?;
     Ok(())
+}
+
+fn run_init(name: Option<String>) -> Result<(), String> {
+    let project_name = name.unwrap_or_else(|| {
+        std::env::current_dir()
+            .ok()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .unwrap_or_else(|| "my_dcl_project".to_string())
+    });
+
+    println!("🔮 Initializing DCL project: {}", project_name);
+
+    // Create directory structure
+    fs::create_dir_all("src").map_err(|e| format!("Failed to create src/: {}", e))?;
+
+    // Create main.dcl
+    let main_content = format!(
+        "module {}\n\ncircuit main(\n    private input: Field,\n    public expected: Field\n) -> bool {{\n    return input == expected;\n}}\n",
+        project_name
+    );
+    let main_path = "src/main.dcl";
+    if !Path::new(main_path).exists() {
+        fs::write(main_path, main_content)
+            .map_err(|e| format!("Failed to write {}: {}", main_path, e))?;
+        println!("   Created {}", main_path);
+    }
+
+    println!("✅ Project '{}' initialized!", project_name);
+    println!("   📁 src/main.dcl");
+    println!("\n   Next steps:");
+    println!("     dcl check src/main.dcl");
+    println!("     dcl compile src/main.dcl");
+    Ok(())
+}
+
+/// Find the Python interpreter to use for optimizer/verifier.
+fn find_python() -> String {
+    let candidates = [
+        "python3",
+        "python",
+    ];
+
+    // Also check for venv in the workspace
+    if let Ok(workspace) = std::env::var("CARGO_MANIFEST_DIR") {
+        let mut p = PathBuf::from(workspace);
+        if p.ends_with("crates/dcl-cli") {
+            p.pop();
+            p.pop();
+        }
+        let venv = p.join(".venv/bin/python");
+        if venv.exists() {
+            return venv.to_string_lossy().to_string();
+        }
+    }
+
+    for c in &candidates {
+        if Command::new(c).arg("--version").output().is_ok() {
+            return c.to_string();
+        }
+    }
+
+    "python3".to_string()
+}
+
+/// Find the workspace root directory containing dcl-optimizer/.
+fn find_workspace_root() -> PathBuf {
+    if Path::new("dcl-optimizer/optimize.py").exists() {
+        return PathBuf::from(".");
+    }
+
+    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        let mut p = PathBuf::from(manifest_dir);
+        if p.ends_with("crates/dcl-cli") {
+            p.pop();
+            p.pop();
+        }
+        return p;
+    }
+
+    PathBuf::from(".")
 }

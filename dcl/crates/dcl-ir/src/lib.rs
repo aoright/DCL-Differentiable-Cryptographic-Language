@@ -1,7 +1,18 @@
-use serde::{Serialize, Deserialize};
-use std::collections::HashMap;
-use dcl_frontend::ast::{self, Module, Circuit, Stmt, Expr, BinOp, Type, Visibility as ASTVisibility};
+//! DCIR (Differentiable Cryptographic Intermediate Representation) module.
+//!
+//! This crate defines the computation graph IR used between the DCL frontend and
+//! backend code generators. It includes:
+//! - A DAG-based [`Graph`] of typed [`Node`]s with strategy annotations
+//! - The [`Lowerer`] that converts AST to DCIR
+//! - Information flow analysis for detecting secret-to-public leaks
+//! - Constant folding and dead code elimination optimization passes
+//! - Under-constrained signal detection
 
+use serde::{Serialize, Deserialize};
+use std::collections::{HashMap, HashSet};
+use dcl_frontend::ast::{self, Module, Circuit, Stmt, Expr, BinOp, UnOp, Type, Visibility as ASTVisibility};
+
+/// Types of computation nodes in the DCIR graph.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum NodeType {
@@ -23,6 +34,7 @@ pub enum NodeType {
     IsZero,
 }
 
+/// Visibility classification for ZKP witness inputs.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Visibility {
@@ -30,6 +42,10 @@ pub enum Visibility {
     Private,
 }
 
+/// An implementation strategy for a node, with associated cost metrics.
+///
+/// The optimizer selects among multiple strategies using Gumbel-Softmax
+/// continuous relaxation.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Strategy {
     pub name: String,
@@ -38,6 +54,7 @@ pub struct Strategy {
     pub noise_cost: f64,
 }
 
+/// A single node in the DCIR computation graph.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Node {
     pub id: usize,
@@ -49,8 +66,11 @@ pub struct Node {
     pub bits: Option<usize>,
     pub visibility: Option<Visibility>,
     pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
 }
 
+/// A directed acyclic computation graph representing a circuit.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Graph {
     pub name: String,
@@ -58,15 +78,39 @@ pub struct Graph {
     pub outputs: Vec<usize>,
 }
 
+/// Information flow classification for taint analysis.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Secrecy {
+    /// Value is publicly known (safe to expose).
     Public,
+    /// Value contains or derives from private secrets.
     Secret,
 }
 
+/// Security analysis configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecurityLevel {
+    /// Information flow violations produce warnings only.
+    Warn,
+    /// Information flow violations produce errors and abort compilation.
+    Error,
+}
+
 impl Graph {
-    pub fn check_information_flow(&self) {
+    /// Perform information flow analysis to detect private-to-public leaks.
+    ///
+    /// Traverses the computation graph, tagging each node as `Public` or `Secret`
+    /// based on its inputs. Alerts if any secret data flows directly to an output
+    /// without passing through a one-way function (e.g., Poseidon hash).
+    pub fn check_information_flow(&self) -> Vec<String> {
+        self.check_information_flow_with_level(SecurityLevel::Warn)
+    }
+
+    /// Information flow analysis with configurable severity level.
+    pub fn check_information_flow_with_level(&self, level: SecurityLevel) -> Vec<String> {
+        let mut diagnostics = Vec::new();
         let mut secrecy: HashMap<usize, Secrecy> = HashMap::new();
+        let node_map: HashMap<usize, &Node> = self.nodes.iter().map(|n| (n.id, n)).collect();
 
         // 1. Traverse nodes and compute secrecy status
         for node in &self.nodes {
@@ -81,7 +125,6 @@ impl Graph {
                 NodeType::Const => Secrecy::Public,
                 NodeType::Poseidon => Secrecy::Public, // poseidon is a secure one-way hash
                 _ => {
-                    // For all other operations, if any input is secret, the output is secret
                     let mut is_secret = false;
                     for &inp in &node.inputs {
                         if secrecy.get(&inp) == Some(&Secrecy::Secret) {
@@ -89,39 +132,75 @@ impl Graph {
                             break;
                         }
                     }
-                    if is_secret {
-                        Secrecy::Secret
-                    } else {
-                        Secrecy::Public
-                    }
+                    if is_secret { Secrecy::Secret } else { Secrecy::Public }
                 }
             };
             secrecy.insert(node.id, node_secrecy);
         }
 
-        // 2. Check outputs
-        let mut leaking_inputs = std::collections::HashSet::new();
+        // 2. Check outputs for leaks
+        let mut leaking_inputs = HashSet::new();
         for &out_id in &self.outputs {
             if secrecy.get(&out_id) == Some(&Secrecy::Secret) {
-                // Trace back to find secret inputs
-                self.trace_secret_inputs(out_id, &secrecy, &mut leaking_inputs);
+                self.trace_secret_inputs(out_id, &secrecy, &node_map, &mut leaking_inputs);
             }
         }
 
         if !leaking_inputs.is_empty() {
             let mut inputs_vec: Vec<String> = leaking_inputs.into_iter().collect();
             inputs_vec.sort();
-            eprintln!(
-                "⚠️  [Security Warning]: Private secret from input(s) '{}' leaks directly to public output in circuit '{}'. Consider passing secrets through a one-way hash function (like poseidon) before exporting.",
-                inputs_vec.join(", "),
-                self.name
+            let prefix = match level {
+                SecurityLevel::Warn => "⚠️  [Security Warning]",
+                SecurityLevel::Error => "❌ [Security Error]",
+            };
+            let msg = format!(
+                "{}: Private secret from input(s) '{}' leaks directly to public output in circuit '{}'. Consider passing secrets through a one-way hash function (like poseidon) before exporting.",
+                prefix, inputs_vec.join(", "), self.name
             );
+            diagnostics.push(msg.clone());
+            eprintln!("{}", msg);
         }
+
+        // 3. Check assert conditions for information leakage
+        for node in &self.nodes {
+            if node.node_type == NodeType::AssertEq {
+                for &inp in &node.inputs {
+                    if secrecy.get(&inp) == Some(&Secrecy::Secret) {
+                        let msg = format!(
+                            "⚠️  [Security Warning]: Assert condition in circuit '{}' references secret data (node '{}'), which may leak information through constraint failure timing.",
+                            self.name, node.label
+                        );
+                        diagnostics.push(msg.clone());
+                        eprintln!("{}", msg);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 4. Under-constrained signal detection
+        let referenced: HashSet<usize> = self.nodes.iter()
+            .flat_map(|n| n.inputs.iter().copied())
+            .chain(self.outputs.iter().copied())
+            .collect();
+
+        for node in &self.nodes {
+            if node.node_type == NodeType::Input && !referenced.contains(&node.id) {
+                let msg = format!(
+                    "⚠️  [Warning]: Input signal '{}' in circuit '{}' is never referenced — possible under-constrained signal.",
+                    node.label, self.name
+                );
+                diagnostics.push(msg.clone());
+                eprintln!("{}", msg);
+            }
+        }
+
+        diagnostics
     }
 
-    fn trace_secret_inputs(&self, node_id: usize, secrecy: &HashMap<usize, Secrecy>, leaking: &mut std::collections::HashSet<String>) {
-        let node = match self.nodes.iter().find(|n| n.id == node_id) {
-            Some(n) => n,
+    fn trace_secret_inputs(&self, node_id: usize, secrecy: &HashMap<usize, Secrecy>, node_map: &HashMap<usize, &Node>, leaking: &mut HashSet<String>) {
+        let node = match node_map.get(&node_id) {
+            Some(n) => *n,
             None => return,
         };
 
@@ -134,12 +213,79 @@ impl Graph {
 
         for &inp in &node.inputs {
             if secrecy.get(&inp) == Some(&Secrecy::Secret) {
-                self.trace_secret_inputs(inp, secrecy, leaking);
+                self.trace_secret_inputs(inp, secrecy, node_map, leaking);
             }
         }
     }
+
+    /// Constant folding: replace sub-expressions with compile-time known values.
+    ///
+    /// Evaluates arithmetic on constant nodes: `Const(2) + Const(3)` → `Const(5)`.
+    pub fn constant_fold(&mut self) {
+        let mut changed = true;
+        while changed {
+            changed = false;
+            let snapshot: Vec<Node> = self.nodes.clone();
+            let val_map: HashMap<usize, &str> = snapshot.iter()
+                .filter(|n| n.node_type == NodeType::Const)
+                .filter_map(|n| n.value.as_deref().map(|v| (n.id, v)))
+                .collect();
+
+            for node in self.nodes.iter_mut() {
+                if node.node_type == NodeType::Const { continue; }
+                if node.inputs.len() == 2 {
+                    let a = val_map.get(&node.inputs[0]).and_then(|s| s.parse::<i128>().ok());
+                    let b = val_map.get(&node.inputs[1]).and_then(|s| s.parse::<i128>().ok());
+                    if let (Some(va), Some(vb)) = (a, b) {
+                        let result = match node.node_type {
+                            NodeType::Add => Some(va + vb),
+                            NodeType::Sub => Some(va - vb),
+                            NodeType::Mul => Some(va * vb),
+                            _ => None,
+                        };
+                        if let Some(r) = result {
+                            node.node_type = NodeType::Const;
+                            node.inputs.clear();
+                            node.value = Some(r.to_string());
+                            node.label = format!("const_folded_{}", r);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Dead code elimination: remove nodes not reachable from outputs or assertions.
+    pub fn dead_code_eliminate(&mut self) {
+        let mut live: HashSet<usize> = HashSet::new();
+        let mut worklist: Vec<usize> = self.outputs.clone();
+
+        // All AssertEq/AssertBool nodes are live roots too
+        for node in &self.nodes {
+            if matches!(node.node_type, NodeType::AssertEq | NodeType::AssertBool) {
+                worklist.push(node.id);
+            }
+        }
+
+        // BFS from live roots
+        while let Some(id) = worklist.pop() {
+            if !live.insert(id) { continue; }
+            if let Some(node) = self.nodes.iter().find(|n| n.id == id) {
+                for &inp in &node.inputs {
+                    worklist.push(inp);
+                }
+            }
+        }
+
+        self.nodes.retain(|n| live.contains(&n.id));
+    }
 }
 
+/// Lowers a DCL AST circuit into a DCIR computation graph.
+///
+/// Handles struct flattening, loop unrolling, conditional branch merging (via
+/// Select MUX nodes), function inlining, and strategy annotation.
 pub struct Lowerer {
     nodes: Vec<Node>,
     next_id: usize,
@@ -147,6 +293,7 @@ pub struct Lowerer {
     struct_defs: HashMap<String, ast::StructDef>,
     circuits: HashMap<String, ast::Circuit>,
     condition_stack: Vec<usize>,
+    current_line: Option<usize>,
 }
 
 impl Lowerer {
@@ -166,6 +313,7 @@ impl Lowerer {
             struct_defs,
             circuits,
             condition_stack: Vec::new(),
+            current_line: None,
         }
     }
 
@@ -187,6 +335,7 @@ impl Lowerer {
             bits: None,
             visibility: None,
             label,
+            line: self.current_line,
         });
         id
     }
@@ -203,6 +352,7 @@ impl Lowerer {
             bits: None,
             visibility: None,
             label,
+            line: self.current_line,
         });
         id
     }
@@ -212,6 +362,7 @@ impl Lowerer {
         self.next_id = 0;
         self.env.clear();
         self.condition_stack.clear();
+        self.current_line = None;
 
         // 1. Lower parameters. Since struct arguments are flattened, we register each leaf field as an input.
         for param in &circuit.params {
@@ -236,6 +387,7 @@ impl Lowerer {
     }
 
     fn lower_statement(&mut self, stmt: &Stmt, outputs: &mut Vec<usize>) -> Result<(), String> {
+        self.current_line = Some(stmt.span().line());
         match stmt {
             Stmt::Let(name, _is_mut, _, expr, _) => {
                 let val_id = self.lower_expr(expr)?;
@@ -288,6 +440,7 @@ impl Lowerer {
                         bits: None,
                         visibility: None,
                         label: format!("loop_idx_{}", i),
+                        line: self.current_line,
                     });
                     self.env.insert(var_name.clone(), i_id);
 
@@ -341,6 +494,7 @@ impl Lowerer {
                                 bits: None,
                                 visibility: None,
                                 label: format!("if_merge_{}_{}", var, select_id),
+                                line: self.current_line,
                             });
                             merged_env.insert((*var).clone(), select_id);
                         }
@@ -383,13 +537,17 @@ impl Lowerer {
                 }
                 Err(format!("Path {} is not a compile-time constant", path))
             }
-            Expr::Unary(ast::UnOp::Not, inner, _) => {
+            Expr::Unary(UnOp::Not, inner, _) => {
                 let val = self.eval_expr_to_const(inner)?;
                 if val.is_zero() {
                     Ok(num_bigint::BigInt::from(1))
                 } else {
                     Ok(num_bigint::BigInt::zero())
                 }
+            }
+            Expr::Unary(UnOp::Neg, inner, _) => {
+                let val = self.eval_expr_to_const(inner)?;
+                Ok(-val)
             }
             Expr::Binary(op, lhs, rhs, _) => {
                 let l = self.eval_expr_to_const(lhs)?;
@@ -473,6 +631,7 @@ impl Lowerer {
                     bits: None,
                     visibility: Some(vis),
                     label: name.to_string(),
+                    line: self.current_line,
                 });
                 self.env.insert(name.to_string(), id);
             }
@@ -494,6 +653,7 @@ impl Lowerer {
     }
 
     fn lower_expr(&mut self, expr: &Expr) -> Result<usize, String> {
+        self.current_line = Some(expr.span().line());
         match expr {
             Expr::Var(name, _) => {
                 // If it's a direct variable name in the environment
@@ -515,6 +675,7 @@ impl Lowerer {
                     bits: None,
                     visibility: None,
                     label: format!("const_{}", val),
+                    line: self.current_line,
                 });
                 Ok(id)
             }
@@ -530,27 +691,17 @@ impl Lowerer {
                     bits: None,
                     visibility: None,
                     label: format!("const_bool_{}", val),
+                    line: self.current_line,
                 });
                 Ok(id)
             }
-            Expr::Unary(ast::UnOp::Not, inner, _) => {
+            Expr::Unary(UnOp::Not, inner, _) => {
                 let val_id = self.lower_expr(inner)?;
-                let one_id = self.alloc_id();
-                self.nodes.push(Node {
-                    id: one_id,
-                    node_type: NodeType::Const,
-                    inputs: Vec::new(),
-                    strategies: Vec::new(),
-                    alpha: None,
-                    value: Some("1".to_string()),
-                    bits: None,
-                    visibility: None,
-                    label: "const_1".to_string(),
-                });
+                let one_id = self.add_const_node("1".to_string(), "const_1".to_string());
                 let not_id = self.add_node(NodeType::Sub, vec![one_id, val_id], format!("logical_not_{}", val_id));
                 Ok(not_id)
             }
-            Expr::Unary(ast::UnOp::Neg, inner, _) => {
+            Expr::Unary(UnOp::Neg, inner, _) => {
                 let val_id = self.lower_expr(inner)?;
                 let zero_id = self.add_const_node("0".to_string(), "const_0".to_string());
                 let neg_id = self.add_node(NodeType::Sub, vec![zero_id, val_id], format!("neg_{}", val_id));
@@ -588,19 +739,8 @@ impl Lowerer {
                     return Err(format!("Base array variable not found or is empty: {}", base_path));
                 }
 
-                // Generate MUX selection tree
-                let mut current_val_id = self.add_const_node("0".to_string(), "mux_base_0".to_string());
-
-                for (idx_val, &el_id) in elements.iter().enumerate().rev() {
-                    let const_k_id = self.add_const_node(idx_val.to_string(), format!("mux_const_{}", idx_val));
-                    let diff_id = self.add_node(NodeType::Sub, vec![idx_id, const_k_id], format!("mux_diff_{}_{}", idx_id, const_k_id));
-                    let cond_id = self.add_node(NodeType::IsZero, vec![diff_id], format!("mux_cond_{}", diff_id));
-                    
-                    // Create Select node: select(cond_id, el_id, current_val_id)
-                    current_val_id = self.add_node(NodeType::Select, vec![cond_id, el_id, current_val_id], format!("mux_select_{}", cond_id));
-                }
-
-                Ok(current_val_id)
+                // Generate O(log N) binary MUX selection tree
+                self.build_binary_mux(&elements, idx_id, 0)
             }
             Expr::Binary(op, lhs, rhs, _) => {
                 let l_id = self.lower_expr(lhs)?;
@@ -643,6 +783,7 @@ impl Lowerer {
                             bits: None,
                             visibility: None,
                             label: "const_1".to_string(),
+                            line: self.current_line,
                         });
                         let neq_id = self.add_node(NodeType::Sub, vec![one_id, isz_id], format!("logical_neq_{}", l_id));
                         Ok(neq_id)
@@ -659,10 +800,10 @@ impl Lowerer {
                         Ok(or_id)
                     }
                     BinOp::Gte => {
-                        // a >= b is range_check(a - b, 64)
+                        let bits = self.estimate_bitwidth(l_id).max(self.estimate_bitwidth(r_id)).max(8);
                         let sub_id = self.add_node(NodeType::Sub, vec![l_id, r_id], format!("cmp_diff_gte_{}", l_id));
                         let rc_id = self.alloc_id();
-                        let strats = range_check_strategies(64);
+                        let strats = range_check_strategies(bits);
                         self.nodes.push(Node {
                             id: rc_id,
                             node_type: NodeType::RangeCheck,
@@ -670,14 +811,15 @@ impl Lowerer {
                             strategies: strats,
                             alpha: Some(vec![0.0; 3]),
                             value: None,
-                            bits: Some(64),
+                            bits: Some(bits),
                             visibility: None,
                             label: format!("cmp_range_gte_{}", rc_id),
+                            line: self.current_line,
                         });
                         Ok(rc_id)
                     }
                     BinOp::Gt => {
-                        // a > b is range_check(a - b - 1, 64)
+                        let bits = self.estimate_bitwidth(l_id).max(self.estimate_bitwidth(r_id)).max(8);
                         let sub_id = self.add_node(NodeType::Sub, vec![l_id, r_id], format!("cmp_diff_gt_{}", l_id));
                         let one_id = self.alloc_id();
                         self.nodes.push(Node {
@@ -690,10 +832,11 @@ impl Lowerer {
                             bits: None,
                             visibility: None,
                             label: "const_1".to_string(),
+                            line: self.current_line,
                         });
                         let diff_minus_one_id = self.add_node(NodeType::Sub, vec![sub_id, one_id], format!("cmp_diff_gt_minus_1_{}", l_id));
                         let rc_id = self.alloc_id();
-                        let strats = range_check_strategies(64);
+                        let strats = range_check_strategies(bits);
                         self.nodes.push(Node {
                             id: rc_id,
                             node_type: NodeType::RangeCheck,
@@ -701,17 +844,18 @@ impl Lowerer {
                             strategies: strats,
                             alpha: Some(vec![0.0; 3]),
                             value: None,
-                            bits: Some(64),
+                            bits: Some(bits),
                             visibility: None,
                             label: format!("cmp_range_gt_{}", rc_id),
+                            line: self.current_line,
                         });
                         Ok(rc_id)
                     }
                     BinOp::Lte => {
-                        // a <= b is range_check(b - a, 64)
+                        let bits = self.estimate_bitwidth(l_id).max(self.estimate_bitwidth(r_id)).max(8);
                         let sub_id = self.add_node(NodeType::Sub, vec![r_id, l_id], format!("cmp_diff_lte_{}", r_id));
                         let rc_id = self.alloc_id();
-                        let strats = range_check_strategies(64);
+                        let strats = range_check_strategies(bits);
                         self.nodes.push(Node {
                             id: rc_id,
                             node_type: NodeType::RangeCheck,
@@ -719,14 +863,15 @@ impl Lowerer {
                             strategies: strats,
                             alpha: Some(vec![0.0; 3]),
                             value: None,
-                            bits: Some(64),
+                            bits: Some(bits),
                             visibility: None,
                             label: format!("cmp_range_lte_{}", rc_id),
+                            line: self.current_line,
                         });
                         Ok(rc_id)
                     }
                     BinOp::Lt => {
-                        // a < b is range_check(b - a - 1, 64)
+                        let bits = self.estimate_bitwidth(l_id).max(self.estimate_bitwidth(r_id)).max(8);
                         let sub_id = self.add_node(NodeType::Sub, vec![r_id, l_id], format!("cmp_diff_lt_{}", r_id));
                         let one_id = self.alloc_id();
                         self.nodes.push(Node {
@@ -739,10 +884,11 @@ impl Lowerer {
                             bits: None,
                             visibility: None,
                             label: "const_1".to_string(),
+                            line: self.current_line,
                         });
                         let diff_minus_one_id = self.add_node(NodeType::Sub, vec![sub_id, one_id], format!("cmp_diff_lt_minus_1_{}", r_id));
                         let rc_id = self.alloc_id();
-                        let strats = range_check_strategies(64);
+                        let strats = range_check_strategies(bits);
                         self.nodes.push(Node {
                             id: rc_id,
                             node_type: NodeType::RangeCheck,
@@ -750,9 +896,10 @@ impl Lowerer {
                             strategies: strats,
                             alpha: Some(vec![0.0; 3]),
                             value: None,
-                            bits: Some(64),
+                            bits: Some(bits),
                             visibility: None,
                             label: format!("cmp_range_lt_{}", rc_id),
+                            line: self.current_line,
                         });
                         Ok(rc_id)
                     }
@@ -778,6 +925,7 @@ impl Lowerer {
                             bits: None,
                             visibility: None,
                             label: format!("poseidon_{}", id),
+                            line: self.current_line,
                         });
                         Ok(id)
                     }
@@ -800,6 +948,7 @@ impl Lowerer {
                             bits: Some(bits),
                             visibility: None,
                             label: format!("range_{}bit_{}", bits, id),
+                            line: self.current_line,
                         });
                         Ok(id)
                     }
@@ -835,9 +984,89 @@ impl Lowerer {
             }
         }
     }
+
+    fn estimate_bitwidth(&self, node_id: usize) -> usize {
+        let node = match self.nodes.iter().find(|n| n.id == node_id) {
+            Some(n) => n,
+            None => return 64,
+        };
+        match node.node_type {
+            NodeType::Const => {
+                if let Some(ref val_str) = node.value {
+                    if let Ok(val) = val_str.parse::<u128>() {
+                        let bits = 128 - val.leading_zeros() as usize;
+                        return bits.max(8);
+                    }
+                }
+                64
+            }
+            NodeType::RangeCheck => node.bits.unwrap_or(64),
+            NodeType::Add => {
+                let a = self.estimate_bitwidth(node.inputs[0]);
+                let b = self.estimate_bitwidth(node.inputs[1]);
+                a.max(b).saturating_add(1).min(64)
+            }
+            NodeType::Sub => {
+                let a = self.estimate_bitwidth(node.inputs[0]);
+                let b = self.estimate_bitwidth(node.inputs[1]);
+                a.max(b).min(64)
+            }
+            NodeType::Mul => {
+                let a = self.estimate_bitwidth(node.inputs[0]);
+                let b = self.estimate_bitwidth(node.inputs[1]);
+                a.saturating_add(b).min(64)
+            }
+            _ => 64,
+        }
+    }
+
+    fn build_binary_mux(&mut self, elements: &[usize], idx_id: usize, start: usize) -> Result<usize, String> {
+        if elements.is_empty() {
+            return Ok(self.add_const_node("0".to_string(), "mux_empty".to_string()));
+        }
+        if elements.len() == 1 {
+            return Ok(elements[0]);
+        }
+        if elements.len() == 2 {
+            let const_start_id = self.add_const_node(start.to_string(), format!("mux_const_{}", start));
+            let diff_id = self.add_node(NodeType::Sub, vec![idx_id, const_start_id], format!("mux_diff_{}", start));
+            let cond_id = self.add_node(NodeType::IsZero, vec![diff_id], format!("mux_cond_{}", start));
+            let select_id = self.add_node(NodeType::Select, vec![cond_id, elements[0], elements[1]], format!("mux_select_leaf_{}", start));
+            return Ok(select_id);
+        }
+
+        let mid_idx = elements.len() / 2;
+        let mid_val = start + mid_idx;
+
+        let const_mid_id = self.add_const_node(mid_val.to_string(), format!("mux_const_mid_{}", mid_val));
+        let diff_id = self.add_node(NodeType::Sub, vec![idx_id, const_mid_id], format!("mux_diff_mid_{}", mid_val));
+        
+        let cond_id = self.alloc_id();
+        let strats = range_check_strategies(64);
+        self.nodes.push(Node {
+            id: cond_id,
+            node_type: NodeType::RangeCheck,
+            inputs: vec![diff_id],
+            strategies: strats,
+            alpha: Some(vec![0.0; 3]),
+            value: None,
+            bits: Some(64),
+            visibility: None,
+            label: format!("mux_range_check_{}", cond_id),
+            line: self.current_line,
+        });
+
+        let left_id = self.build_binary_mux(&elements[..mid_idx], idx_id, start)?;
+        let right_id = self.build_binary_mux(&elements[mid_idx..], idx_id, mid_val)?;
+
+        let select_id = self.add_node(NodeType::Select, vec![cond_id, right_id, left_id], format!("mux_select_node_{}", mid_val));
+        Ok(select_id)
+    }
 }
 
-// Strategy helper functions (matching the Python cost model)
+/// Generate candidate strategies for a range check of `bits` width.
+///
+/// Returns three strategies: boolean decomposition, lookup table, and polynomial approximation.
 fn range_check_strategies(bits: usize) -> Vec<Strategy> {
     vec![
         Strategy {

@@ -373,8 +373,8 @@ fn test_tfhe_backend_compilation() {
 
     assert!(tfhe_code.contains("pub fn compute("));
     assert!(tfhe_code.contains("pub struct computeInputs"));
-    assert!(tfhe_code.contains("let n_2 = &n_0 * &n_1;"));
-    assert!(tfhe_code.contains("let n_3 = &n_2 + &n_0;"));
+    assert!(tfhe_code.contains("let mut n_2 = &n_0 * &n_1;"));
+    assert!(tfhe_code.contains("let mut n_3 = &n_2 + &n_0;"));
 }
 
 #[test]
@@ -634,4 +634,311 @@ fn test_duplicate_circuit_error() {
     let mut checker = TypeChecker::new();
     let err = checker.check_module(&module).unwrap_err();
     assert!(err.contains("[Error at line 3, col 9]: Duplicate circuit definition: foo"));
+}
+
+// ============================================================
+// Phase 1 Tests: Lexer / Parser / TypeChecker enhancements
+// ============================================================
+
+#[test]
+fn test_block_comments() {
+    let input = r#"
+        module BlockCommentTest
+        /* This is a block comment */
+        circuit main(private x: Field) -> Field {
+            /* Another /* nested */ comment */
+            return x;
+        }
+    "#;
+    let mut lexer = Lexer::new(input);
+    let tokens = lexer.tokenize().unwrap();
+    let mut parser = Parser::new(tokens);
+    let module = parser.parse_module().unwrap();
+    let mut checker = TypeChecker::new();
+    checker.check_module(&module).unwrap();
+    assert_eq!(module.circuits.len(), 1);
+}
+
+#[test]
+fn test_hex_literals() {
+    let input = r#"
+        module HexTest
+        circuit main() -> Field {
+            return 0xFF;
+        }
+    "#;
+    let mut lexer = Lexer::new(input);
+    let tokens = lexer.tokenize().unwrap();
+    let mut parser = Parser::new(tokens);
+    let module = parser.parse_module().unwrap();
+    let mut checker = TypeChecker::new();
+    checker.check_module(&module).unwrap();
+
+    let circuit = &module.circuits[0];
+    let mut lowerer = Lowerer::new(&module);
+    let graph = lowerer.lower_circuit(circuit).unwrap();
+
+    let codegen = CodeGenerator::new(graph);
+    let circom_code = codegen.generate_circom().unwrap();
+    assert!(circom_code.contains("255")); // 0xFF = 255
+}
+
+#[test]
+fn test_unary_negation_compilation() {
+    let input = r#"
+        module NegTest
+        circuit negate(private x: Field) -> Field {
+            return -x;
+        }
+    "#;
+    let mut lexer = Lexer::new(input);
+    let tokens = lexer.tokenize().unwrap();
+    let mut parser = Parser::new(tokens);
+    let module = parser.parse_module().unwrap();
+    let mut checker = TypeChecker::new();
+    checker.check_module(&module).unwrap();
+
+    let circuit = &module.circuits[0];
+    let mut lowerer = Lowerer::new(&module);
+    let graph = lowerer.lower_circuit(circuit).unwrap();
+
+    // Should have a Sub node (0 - x)
+    let has_sub = graph.nodes.iter().any(|n| n.node_type == dcl_ir::NodeType::Sub);
+    assert!(has_sub, "Negation should produce a Sub(0, x) node");
+}
+
+#[test]
+fn test_did_you_mean_suggestion() {
+    let input = r#"
+        module SuggestionTest
+        circuit main(private value: Field) -> Field {
+            return vlue;
+        }
+    "#;
+    let mut lexer = Lexer::new(input);
+    let tokens = lexer.tokenize().unwrap();
+    let mut parser = Parser::new(tokens);
+    let module = parser.parse_module().unwrap();
+    let mut checker = TypeChecker::new();
+    let err = checker.check_module(&module).unwrap_err();
+    assert!(err.contains("Did you mean 'value'?"), "Error was: {}", err);
+}
+
+// ============================================================
+// Phase 2 Tests: IR optimizations
+// ============================================================
+
+#[test]
+fn test_constant_folding() {
+    let input = r#"
+        module ConstFoldTest
+        circuit main() -> Field {
+            let x = 10 + 20;
+            return x;
+        }
+    "#;
+    let mut lexer = Lexer::new(input);
+    let tokens = lexer.tokenize().unwrap();
+    let mut parser = Parser::new(tokens);
+    let module = parser.parse_module().unwrap();
+    let mut checker = TypeChecker::new();
+    checker.check_module(&module).unwrap();
+
+    let circuit = &module.circuits[0];
+    let mut lowerer = Lowerer::new(&module);
+    let mut graph = lowerer.lower_circuit(circuit).unwrap();
+
+    graph.constant_fold();
+    // After folding, Const(10) + Const(20) should become Const(30)
+    let has_30 = graph.nodes.iter().any(|n| {
+        n.node_type == dcl_ir::NodeType::Const && n.value.as_deref() == Some("30")
+    });
+    assert!(has_30, "Constant folding should produce Const(30)");
+}
+
+#[test]
+fn test_dead_code_elimination() {
+    let input = r#"
+        module DCETest
+        circuit main(private x: Field, private y: Field) -> Field {
+            let unused = y * y;
+            return x;
+        }
+    "#;
+    let mut lexer = Lexer::new(input);
+    let tokens = lexer.tokenize().unwrap();
+    let mut parser = Parser::new(tokens);
+    let module = parser.parse_module().unwrap();
+    let mut checker = TypeChecker::new();
+    checker.check_module(&module).unwrap();
+
+    let circuit = &module.circuits[0];
+    let mut lowerer = Lowerer::new(&module);
+    let mut graph = lowerer.lower_circuit(circuit).unwrap();
+
+    let before_count = graph.nodes.len();
+    graph.dead_code_eliminate();
+    let after_count = graph.nodes.len();
+
+    // The Mul node for y*y and possibly the y input should be eliminated
+    assert!(after_count < before_count, "DCE should remove unreachable nodes: before={}, after={}", before_count, after_count);
+}
+
+#[test]
+fn test_information_flow_leak_detection() {
+    let input = r#"
+        module LeakTest
+        circuit leaky(private secret: Field) -> Field {
+            return secret;
+        }
+    "#;
+    let mut lexer = Lexer::new(input);
+    let tokens = lexer.tokenize().unwrap();
+    let mut parser = Parser::new(tokens);
+    let module = parser.parse_module().unwrap();
+    let mut checker = TypeChecker::new();
+    checker.check_module(&module).unwrap();
+
+    let circuit = &module.circuits[0];
+    let mut lowerer = Lowerer::new(&module);
+    let graph = lowerer.lower_circuit(circuit).unwrap();
+
+    let diagnostics = graph.check_information_flow();
+    assert!(!diagnostics.is_empty(), "Should detect secret-to-output leak");
+    assert!(diagnostics[0].contains("secret"), "Diagnostic should mention the leaking variable");
+}
+
+#[test]
+fn test_under_constrained_signal_detection() {
+    let input = r#"
+        module UnderConstrainedTest
+        circuit test_uc(
+            private x: Field,
+            private unused_param: Field
+        ) -> Field {
+            return x;
+        }
+    "#;
+    let mut lexer = Lexer::new(input);
+    let tokens = lexer.tokenize().unwrap();
+    let mut parser = Parser::new(tokens);
+    let module = parser.parse_module().unwrap();
+    let mut checker = TypeChecker::new();
+    checker.check_module(&module).unwrap();
+
+    let circuit = &module.circuits[0];
+    let mut lowerer = Lowerer::new(&module);
+    let graph = lowerer.lower_circuit(circuit).unwrap();
+
+    let diagnostics = graph.check_information_flow();
+    let has_uc_warning = diagnostics.iter().any(|d| d.contains("under-constrained"));
+    assert!(has_uc_warning, "Should detect unused_param as under-constrained. Diagnostics: {:?}", diagnostics);
+}
+
+// ============================================================
+// Phase 4 Tests: Standard library
+// ============================================================
+
+#[test]
+fn test_stdlib_bits_compilation() {
+    let input = r#"
+        module BitsTest
+        circuit bit_and(a: Field, b: Field) -> Field {
+            return a * b;
+        }
+        circuit bit_xor(a: Field, b: Field) -> Field {
+            let product = a * b;
+            let double_product = product * 2;
+            let sum = a + b;
+            return sum - double_product;
+        }
+        circuit test_bits(private a: Field, private b: Field) -> Field {
+            let and_result = bit_and(a, b);
+            let xor_result = bit_xor(a, b);
+            return and_result + xor_result;
+        }
+    "#;
+    let mut lexer = Lexer::new(input);
+    let tokens = lexer.tokenize().unwrap();
+    let mut parser = Parser::new(tokens);
+    let module = parser.parse_module().unwrap();
+    let mut checker = TypeChecker::new();
+    checker.check_module(&module).unwrap();
+
+    // Compile test_bits (3rd circuit, first non-trivial)
+    let circuit = module.circuits.iter().find(|c| c.name == "test_bits").unwrap();
+    let mut lowerer = Lowerer::new(&module);
+    let graph = lowerer.lower_circuit(circuit).unwrap();
+
+    let codegen = CodeGenerator::new(graph);
+    let circom_code = codegen.generate_circom().unwrap();
+    assert!(circom_code.contains("template test_bitsMain()"));
+}
+
+#[test]
+fn test_stdlib_math_min_max() {
+    let input = r#"
+        module MathTest
+        circuit min(a: Field, b: Field) -> Field {
+            let a_leq_b = a <= b;
+            let mut result = b;
+            if a_leq_b {
+                result = a;
+            }
+            return result;
+        }
+        circuit max(a: Field, b: Field) -> Field {
+            let a_geq_b = a >= b;
+            let mut result = b;
+            if a_geq_b {
+                result = a;
+            }
+            return result;
+        }
+        circuit test_math(private x: Field, private y: Field) -> Field {
+            let lo = min(x, y);
+            let hi = max(x, y);
+            return hi - lo;
+        }
+    "#;
+    let mut lexer = Lexer::new(input);
+    let tokens = lexer.tokenize().unwrap();
+    let mut parser = Parser::new(tokens);
+    let module = parser.parse_module().unwrap();
+    let mut checker = TypeChecker::new();
+    checker.check_module(&module).unwrap();
+
+    let circuit = module.circuits.iter().find(|c| c.name == "test_math").unwrap();
+    let mut lowerer = Lowerer::new(&module);
+    let graph = lowerer.lower_circuit(circuit).unwrap();
+
+    // Should have Select nodes from if/else in min/max
+    let has_select = graph.nodes.iter().any(|n| n.node_type == dcl_ir::NodeType::Select);
+    assert!(has_select, "min/max should produce Select MUX nodes");
+}
+
+#[test]
+fn test_span_range_positions() {
+    use dcl_frontend::ast::Span;
+    
+    let s1 = Span::range(1, 5, 1, 10);
+    let s2 = Span::range(3, 1, 3, 15);
+    let merged = s1.merge(&s2);
+    
+    assert_eq!(merged.start_line, 1);
+    assert_eq!(merged.start_col, 5);
+    assert_eq!(merged.end_line, 3);
+    assert_eq!(merged.end_col, 15);
+}
+
+#[test]
+fn test_recursive_struct_detection() {
+    let input = "module Test\ntype Node = { value: Field, next: Node }\ncircuit main() -> bool { return true; }";
+    let mut lexer = Lexer::new(input);
+    let tokens = lexer.tokenize().unwrap();
+    let mut parser = Parser::new(tokens);
+    let module = parser.parse_module().unwrap();
+    let mut checker = TypeChecker::new();
+    let err = checker.check_module(&module).unwrap_err();
+    assert!(err.contains("Recursive struct type"), "Should detect recursive struct. Error was: {}", err);
 }

@@ -1,12 +1,23 @@
 use dcl_ir::{Graph, NodeType, Visibility};
+use std::collections::HashMap;
 
 pub struct CodeGenerator {
     graph: Graph,
+    wire_names: HashMap<usize, String>,
 }
 
 impl CodeGenerator {
     pub fn new(graph: Graph) -> Self {
-        Self { graph }
+        let mut wire_names = HashMap::new();
+        for node in &graph.nodes {
+            let name = if node.node_type == NodeType::Input {
+                node.label.clone()
+            } else {
+                format!("n_{}", node.id)
+            };
+            wire_names.insert(node.id, name);
+        }
+        Self { graph, wire_names }
     }
 
     pub fn generate_circom(&self) -> Result<String, String> {
@@ -50,34 +61,40 @@ impl CodeGenerator {
 
         // 3. Generate Constraints
         for node in &self.graph.nodes {
+            let comment = if let Some(line_num) = node.line {
+                format!(" // Line {}", line_num)
+            } else {
+                String::new()
+            };
+
             match node.node_type {
                 NodeType::Input => {
                     // Already declared, nothing to constrain here
                 }
                 NodeType::Const => {
                     let val = node.value.as_deref().unwrap_or("0");
-                    code.push_str(&format!("    n_{} <== {};\n", node.id, val));
+                    code.push_str(&format!("    n_{} <== {};{}\n", node.id, val, comment));
                 }
                 NodeType::Add => {
                     let a = self.wire_name(node.inputs[0]);
                     let b = self.wire_name(node.inputs[1]);
-                    code.push_str(&format!("    n_{} <== {} + {};\n", node.id, a, b));
+                    code.push_str(&format!("    n_{} <== {} + {};{}\n", node.id, a, b, comment));
                 }
                 NodeType::Sub => {
                     let a = self.wire_name(node.inputs[0]);
                     let b = self.wire_name(node.inputs[1]);
-                    code.push_str(&format!("    n_{} <== {} - {};\n", node.id, a, b));
+                    code.push_str(&format!("    n_{} <== {} - {};{}\n", node.id, a, b, comment));
                 }
                 NodeType::Mul => {
                     let a = self.wire_name(node.inputs[0]);
                     let b = self.wire_name(node.inputs[1]);
-                    code.push_str(&format!("    n_{} <== {} * {};\n", node.id, a, b));
+                    code.push_str(&format!("    n_{} <== {} * {};{}\n", node.id, a, b, comment));
                 }
                 NodeType::Div => {
                     let a = self.wire_name(node.inputs[0]);
                     let b = self.wire_name(node.inputs[1]);
                     // Secure division by zero: enforce divisor b != 0 using an inverse signal constraint
-                    code.push_str(&format!("    signal inv_div_{};\n", node.id));
+                    code.push_str(&format!("    signal inv_div_{};{}\n", node.id, comment));
                     code.push_str(&format!("    inv_div_{} <-- {} == 0 ? 0 : 1 / {};\n", node.id, b, b));
                     code.push_str(&format!("    {} * inv_div_{} === 1;\n", b, node.id));
                     // Constrain division output
@@ -89,16 +106,16 @@ impl CodeGenerator {
                     let t = self.wire_name(node.inputs[1]);
                     let f = self.wire_name(node.inputs[2]);
                     // out = cond * (t - f) + f
-                    code.push_str(&format!("    n_{} <== {} * ({} - {}) + {};\n", node.id, cond, t, f, f));
+                    code.push_str(&format!("    n_{} <== {} * ({} - {}) + {};{}\n", node.id, cond, t, f, f, comment));
                 }
                 NodeType::AssertEq => {
                     let a = self.wire_name(node.inputs[0]);
                     let b = self.wire_name(node.inputs[1]);
-                    code.push_str(&format!("    {} === {};\n", a, b));
+                    code.push_str(&format!("    {} === {};{}\n", a, b, comment));
                 }
                 NodeType::AssertBool => {
                     let b = self.wire_name(node.inputs[0]);
-                    code.push_str(&format!("    {} * (1 - {}) === 0;\n", b, b));
+                    code.push_str(&format!("    {} * (1 - {}) === 0;{}\n", b, b, comment));
                 }
                 NodeType::RangeCheck => {
                     let x = self.wire_name(node.inputs[0]);
@@ -121,7 +138,7 @@ impl CodeGenerator {
                         // Lookup Table strategy optimization placeholder
                         // In Circom, lookup checks can be modeled or implemented using table gadgets.
                         // Here we output a simplified constraint representing the optimized state.
-                        code.push_str(&format!("    // Optimized: Lookup table range check ({} bits)\n", bits));
+                        code.push_str(&format!("    // Optimized: Lookup table range check ({} bits){}\n", bits, comment));
                         // For the PoC compilation correctness, we use a lightweight constraint
                         code.push_str(&format!("    signal bits_lookup_{}[{}];\n", node.id, bits));
                         code.push_str(&format!("    // Table index constraint lookup mapping...\n"));
@@ -129,13 +146,13 @@ impl CodeGenerator {
                         self.generate_inline_range_check(&mut code, node.id, &x, bits);
                     } else {
                         // Boolean decomposition strategy
-                        code.push_str(&format!("    // Boolean decomposition range check ({} bits)\n", bits));
+                        code.push_str(&format!("    // Boolean decomposition range check ({} bits){}\n", bits, comment));
                         self.generate_inline_range_check(&mut code, node.id, &x, bits);
                     }
                 }
                 NodeType::Poseidon => {
                     let num_inputs = node.inputs.len();
-                    code.push_str(&format!("    component poseidon_{} = Poseidon({});\n", node.id, num_inputs));
+                    code.push_str(&format!("    component poseidon_{} = Poseidon({});{}\n", node.id, num_inputs, comment));
                     for (i, &inp_id) in node.inputs.iter().enumerate() {
                         let name = self.wire_name(inp_id);
                         code.push_str(&format!("    poseidon_{}.inputs[{}] <== {};\n", node.id, i, name));
@@ -144,7 +161,7 @@ impl CodeGenerator {
                 }
                 NodeType::IsZero => {
                     let inp = self.wire_name(node.inputs[0]);
-                    code.push_str(&format!("    inv_{} <-- {} == 0 ? 0 : 1 / {};\n", node.id, inp, inp));
+                    code.push_str(&format!("    inv_{} <-- {} == 0 ? 0 : 1 / {};{}\n", node.id, inp, inp, comment));
                     code.push_str(&format!("    n_{} <== 1 - {} * inv_{};\n", node.id, inp, node.id));
                     code.push_str(&format!("    {} * n_{} === 0;\n", inp, node.id));
                 }
@@ -174,17 +191,7 @@ impl CodeGenerator {
     }
 
     fn wire_name(&self, id: usize) -> String {
-        // Find the node to check if it's an input (which uses its label) or intermediate (n_id)
-        for node in &self.graph.nodes {
-            if node.id == id {
-                if node.node_type == NodeType::Input {
-                    return node.label.clone();
-                } else {
-                    return format!("n_{}", id);
-                }
-            }
-        }
-        format!("n_{}", id)
+        self.wire_names.get(&id).cloned().unwrap_or_else(|| format!("n_{}", id))
     }
 
     fn generate_inline_range_check(&self, code: &mut String, node_id: usize, x: &str, bits: usize) {
@@ -229,7 +236,7 @@ impl CodeGenerator {
             match node.node_type {
                 NodeType::Input => {
                     noise_levels.insert(node.id, 1.0);
-                    code.push_str(&format!("    let n_{} = inputs.{}.clone();\n", node.id, node.label));
+                    code.push_str(&format!("    let mut n_{} = inputs.{}.clone();\n", node.id, node.label));
                 }
                 NodeType::Const => {
                     noise_levels.insert(node.id, 0.0);
@@ -238,7 +245,7 @@ impl CodeGenerator {
                         // fallback or modular reduction if needed, but parsing to u64 is standard for FheUint64
                         0
                     });
-                    code.push_str(&format!("    let n_{} = FheUint64::try_encrypt_trivial({}, server_key).unwrap();\n", node.id, val));
+                    code.push_str(&format!("    let mut n_{} = FheUint64::try_encrypt_trivial({}, server_key).unwrap();\n", node.id, val));
                 }
                 NodeType::Add | NodeType::Sub => {
                     let a = node.inputs[0];
@@ -249,11 +256,11 @@ impl CodeGenerator {
 
                     if noise_a + noise_b > noise_budget {
                         if noise_a >= noise_b {
-                            code.push_str(&format!("    let n_{} = server_key.bootstrap(&n_{});\n", a, a));
+                            code.push_str(&format!("    n_{} = server_key.bootstrap(&n_{});\n", a, a));
                             noise_a = 1.0;
                             noise_levels.insert(a, 1.0);
                         } else {
-                            code.push_str(&format!("    let n_{} = server_key.bootstrap(&n_{});\n", b, b));
+                            code.push_str(&format!("    n_{} = server_key.bootstrap(&n_{});\n", b, b));
                             noise_b = 1.0;
                             noise_levels.insert(b, 1.0);
                         }
@@ -261,7 +268,7 @@ impl CodeGenerator {
 
                     noise_levels.insert(node.id, noise_a + noise_b);
                     let op = if node.node_type == NodeType::Add { "+" } else { "-" };
-                    code.push_str(&format!("    let n_{} = &n_{} {} &n_{};\n", node.id, a, op, b));
+                    code.push_str(&format!("    let mut n_{} = &n_{} {} &n_{};\n", node.id, a, op, b));
                 }
                 NodeType::Mul | NodeType::Div => {
                     let a = node.inputs[0];
@@ -274,11 +281,11 @@ impl CodeGenerator {
 
                     if proj_noise > noise_budget {
                         if noise_a >= noise_b {
-                            code.push_str(&format!("    let n_{} = server_key.bootstrap(&n_{});\n", a, a));
+                            code.push_str(&format!("    n_{} = server_key.bootstrap(&n_{});\n", a, a));
                             noise_a = 1.0;
                             noise_levels.insert(a, 1.0);
                         } else {
-                            code.push_str(&format!("    let n_{} = server_key.bootstrap(&n_{});\n", b, b));
+                            code.push_str(&format!("    n_{} = server_key.bootstrap(&n_{});\n", b, b));
                             noise_b = 1.0;
                             noise_levels.insert(b, 1.0);
                         }
@@ -287,11 +294,11 @@ impl CodeGenerator {
                         
                         if proj_noise > noise_budget {
                             if noise_a > 1.0 {
-                                code.push_str(&format!("    let n_{} = server_key.bootstrap(&n_{});\n", a, a));
+                                code.push_str(&format!("    n_{} = server_key.bootstrap(&n_{});\n", a, a));
                                 noise_a = 1.0;
                                 noise_levels.insert(a, 1.0);
                             } else {
-                                code.push_str(&format!("    let n_{} = server_key.bootstrap(&n_{});\n", b, b));
+                                code.push_str(&format!("    n_{} = server_key.bootstrap(&n_{});\n", b, b));
                                 noise_b = 1.0;
                                 noise_levels.insert(b, 1.0);
                             }
@@ -301,7 +308,7 @@ impl CodeGenerator {
 
                     noise_levels.insert(node.id, proj_noise);
                     let op = if node.node_type == NodeType::Mul { "*" } else { "/" };
-                    code.push_str(&format!("    let n_{} = &n_{} {} &n_{};\n", node.id, a, op, b));
+                    code.push_str(&format!("    let mut n_{} = &n_{} {} &n_{};\n", node.id, a, op, b));
                 }
                 NodeType::Select => {
                     let cond = node.inputs[0];
@@ -315,15 +322,15 @@ impl CodeGenerator {
                     let mut proj_noise = f64::max(noise_t, noise_f) + noise_cond;
                     if proj_noise > noise_budget {
                         if noise_cond >= noise_t && noise_cond >= noise_f {
-                            code.push_str(&format!("    let n_{} = server_key.bootstrap(&n_{});\n", cond, cond));
+                            code.push_str(&format!("    n_{} = server_key.bootstrap(&n_{});\n", cond, cond));
                             noise_cond = 1.0;
                             noise_levels.insert(cond, 1.0);
                         } else if noise_t >= noise_f {
-                            code.push_str(&format!("    let n_{} = server_key.bootstrap(&n_{});\n", t, t));
+                            code.push_str(&format!("    n_{} = server_key.bootstrap(&n_{});\n", t, t));
                             noise_t = 1.0;
                             noise_levels.insert(t, 1.0);
                         } else {
-                            code.push_str(&format!("    let n_{} = server_key.bootstrap(&n_{});\n", f, f));
+                            code.push_str(&format!("    n_{} = server_key.bootstrap(&n_{});\n", f, f));
                             noise_f = 1.0;
                             noise_levels.insert(f, 1.0);
                         }
@@ -332,13 +339,13 @@ impl CodeGenerator {
 
                     noise_levels.insert(node.id, proj_noise);
                     code.push_str(&format!("    let cond_bool_{} = n_{}.eq(1u64);\n", node.id, cond));
-                    code.push_str(&format!("    let n_{} = cond_bool_{}.select(&n_{}, &n_{});\n", node.id, node.id, t, f));
+                    code.push_str(&format!("    let mut n_{} = cond_bool_{}.select(&n_{}, &n_{});\n", node.id, node.id, t, f));
                 }
                 NodeType::IsZero => {
                     let a = node.inputs[0];
                     let mut noise_a = *noise_levels.get(&a).unwrap_or(&1.0);
                     if noise_a + 1.0 > noise_budget {
-                        code.push_str(&format!("    let n_{} = server_key.bootstrap(&n_{});\n", a, a));
+                        code.push_str(&format!("    n_{} = server_key.bootstrap(&n_{});\n", a, a));
                         noise_a = 1.0;
                         noise_levels.insert(a, 1.0);
                     }
@@ -346,35 +353,39 @@ impl CodeGenerator {
                     code.push_str(&format!("    let cond_zero_{} = n_{}.eq(0u64);\n", node.id, a));
                     code.push_str(&format!("    let one_const_{} = FheUint64::try_encrypt_trivial(1u64, server_key).unwrap();\n", node.id));
                     code.push_str(&format!("    let zero_const_{} = FheUint64::try_encrypt_trivial(0u64, server_key).unwrap();\n", node.id));
-                    code.push_str(&format!("    let n_{} = cond_zero_{}.select(&one_const_{}, &zero_const_{});\n", node.id, node.id, node.id, node.id));
+                    code.push_str(&format!("    let mut n_{} = cond_zero_{}.select(&one_const_{}, &zero_const_{});\n", node.id, node.id, node.id, node.id));
                 }
                 NodeType::RangeCheck => {
                     let a = node.inputs[0];
                     let mut noise_a = *noise_levels.get(&a).unwrap_or(&1.0);
                     if noise_a + 1.0 > noise_budget {
-                        code.push_str(&format!("    let n_{} = server_key.bootstrap(&n_{});\n", a, a));
+                        code.push_str(&format!("    n_{} = server_key.bootstrap(&n_{});\n", a, a));
                         noise_a = 1.0;
                         noise_levels.insert(a, 1.0);
                     }
                     noise_levels.insert(node.id, noise_a + 1.0);
                     let bits = node.bits.unwrap_or(8);
-                    let max_val = (1 << bits) as u64;
-                    code.push_str(&format!("    let cond_range_{} = n_{}.lt({}u64);\n", node.id, a, max_val));
+                    let max_val = if bits >= 64 {
+                        "u64::MAX".to_string()
+                    } else {
+                        format!("{}u64", 1u64 << bits)
+                    };
+                    code.push_str(&format!("    let cond_range_{} = n_{}.lt({});\n", node.id, a, max_val));
                     code.push_str(&format!("    let one_const_{} = FheUint64::try_encrypt_trivial(1u64, server_key).unwrap();\n", node.id));
                     code.push_str(&format!("    let zero_const_{} = FheUint64::try_encrypt_trivial(0u64, server_key).unwrap();\n", node.id));
-                    code.push_str(&format!("    let n_{} = cond_range_{}.select(&one_const_{}, &zero_const_{});\n", node.id, node.id, node.id, node.id));
+                    code.push_str(&format!("    let mut n_{} = cond_range_{}.select(&one_const_{}, &zero_const_{});\n", node.id, node.id, node.id, node.id));
                 }
                 NodeType::Poseidon => {
                     let a = node.inputs[0];
                     let mut noise_a = *noise_levels.get(&a).unwrap_or(&1.0);
                     if noise_a + 1.0 > noise_budget {
-                        code.push_str(&format!("    let n_{} = server_key.bootstrap(&n_{});\n", a, a));
+                        code.push_str(&format!("    n_{} = server_key.bootstrap(&n_{});\n", a, a));
                         noise_a = 1.0;
                         noise_levels.insert(a, 1.0);
                     }
                     noise_levels.insert(node.id, noise_a + 1.0);
                     code.push_str(&format!("    // WARNING: Poseidon is algebraically complex in FHE; using stub\n"));
-                    code.push_str(&format!("    let n_{} = n_{}.clone();\n", node.id, node.inputs[0]));
+                    code.push_str(&format!("    let mut n_{} = n_{}.clone();\n", node.id, node.inputs[0]));
                 }
                 NodeType::AssertEq | NodeType::AssertBool => {
                     code.push_str(&format!("    // Assertion check node {}\n", node.id));
