@@ -21,6 +21,11 @@ pub enum Token {
     Return,
     FieldTy,
     BoolTy,
+    /// Constrained unsigned integer type tokens
+    U8Ty,
+    U16Ty,
+    U32Ty,
+    U64Ty,
     For,
     In,
     If,
@@ -150,7 +155,7 @@ impl<'a> Lexer<'a> {
                             }
                             None => {
                                 return Err(format!(
-                                    "[Error at line {}, col {}]: Unterminated block comment",
+                                    "[Error at line {}, col {}] [DCL-E301]: Unterminated block comment",
                                     start_line, start_col
                                 ));
                             }
@@ -187,6 +192,10 @@ impl<'a> Lexer<'a> {
                     "return" => Token::Return,
                     "Field" => Token::FieldTy,
                     "bool" => Token::BoolTy,
+                    "u8" => Token::U8Ty,
+                    "u16" => Token::U16Ty,
+                    "u32" => Token::U32Ty,
+                    "u64" => Token::U64Ty,
                     "true" => Token::Bool(true),
                     "false" => Token::Bool(false),
                     "for" => Token::For,
@@ -223,14 +232,15 @@ impl<'a> Lexer<'a> {
                         }
                         if hex_str.is_empty() {
                             return Err(format!(
-                                "[Error at line {}, col {}]: Invalid hexadecimal literal: 0x",
+                                "[Error at line {}, col {}] [DCL-E301]: Invalid hexadecimal literal: 0x",
                                 start_line, start_col
                             ));
                         }
-                        // Convert hex to decimal string for uniform downstream processing
-                        let decimal_val = u128::from_str_radix(&hex_str, 16).map_err(|_| {
+                        // Convert hex to decimal string using BigUint for full 254-bit support
+                        use num_bigint::BigUint;
+                        let decimal_val = BigUint::parse_bytes(hex_str.as_bytes(), 16).ok_or_else(|| {
                             format!(
-                                "[Error at line {}, col {}]: Hexadecimal literal too large: 0x{}",
+                                "[Error at line {}, col {}] [DCL-E301]: Invalid hexadecimal literal: 0x{}",
                                 start_line, start_col, hex_str
                             )
                         })?;
@@ -353,7 +363,7 @@ impl<'a> Lexer<'a> {
                     tokens.push(TokenWithSpan { token: Token::And, span });
                     continue;
                 } else {
-                    return Err(format!("[Error at line {}, col {}]: Unexpected character: '&' (expected '&&')", start_line, start_col));
+                    return Err(format!("[Error at line {}, col {}] [DCL-E301]: Unexpected character: '&' (expected '&&')", start_line, start_col));
                 }
             }
 
@@ -365,7 +375,7 @@ impl<'a> Lexer<'a> {
                     tokens.push(TokenWithSpan { token: Token::Or, span });
                     continue;
                 } else {
-                    return Err(format!("[Error at line {}, col {}]: Unexpected character: '|' (expected '||')", start_line, start_col));
+                    return Err(format!("[Error at line {}, col {}] [DCL-E301]: Unexpected character: '|' (expected '||')", start_line, start_col));
                 }
             }
 
@@ -394,7 +404,7 @@ impl<'a> Lexer<'a> {
                 ']' => Token::RBracket,
                 ',' => Token::Comma,
                 ';' => Token::Semicolon,
-                _ => return Err(format!("[Error at line {}, col {}]: Unexpected character: '{}'", start_line, start_col, c)),
+                _ => return Err(format!("[Error at line {}, col {}] [DCL-E301]: Unexpected character: '{}'", start_line, start_col, c)),
             };
             self.next_char();
             let span = self.make_span(start_line, start_col);

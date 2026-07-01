@@ -171,6 +171,10 @@ def optimize(graph: dict, epochs: int = 300, base_lr: float = 0.05) -> dict:
     # Initialize alphas (all zeros = uniform prior)
     alphas = [jnp.zeros(len(cm)) for cm in cost_matrices]
 
+    # Adam optimizer state: first and second moment estimates
+    m_t = [jnp.zeros_like(a) for a in alphas]  # First moment (mean of gradients)
+    v_t = [jnp.zeros_like(a) for a in alphas]  # Second moment (mean of squared gradients)
+
     loss_fn = build_loss_fn(cost_matrices, topo_depths)
 
     if HAS_JAX:
@@ -220,10 +224,16 @@ def optimize(graph: dict, epochs: int = 300, base_lr: float = 0.05) -> dict:
             print(f"   ⏱️  Early stopping at epoch {epoch} (no improvement for {patience_limit} epochs)")
             break
 
-        # Gradient update (only with JAX)
+        # Gradient update using Adam optimizer (only with JAX)
         if grad_fn is not None:
             grads = grad_fn(alphas, tau, subkeys)
-            alphas = [a - lr * g for a, g in zip(alphas, grads)]
+            beta1, beta2, eps = 0.9, 0.999, 1e-8
+            for i, g in enumerate(grads):
+                m_t[i] = beta1 * m_t[i] + (1 - beta1) * g
+                v_t[i] = beta2 * v_t[i] + (1 - beta2) * (g ** 2)
+                m_hat = m_t[i] / (1 - beta1 ** (epoch + 1))
+                v_hat = v_t[i] / (1 - beta2 ** (epoch + 1))
+                alphas[i] = alphas[i] - lr * m_hat / (jnp.sqrt(v_hat) + eps)
 
         # Progress logging
         if epoch % 50 == 0 or epoch == epochs - 1:

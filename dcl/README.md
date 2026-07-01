@@ -1,7 +1,7 @@
 # 🔮 DCL — Differentiable Cryptographic Language
 
 [![Build](https://img.shields.io/badge/build-passing-brightgreen)]()
-[![Tests](https://img.shields.io/badge/tests-30%20passing-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-71%20passing-brightgreen)]()
 [![License](https://img.shields.io/badge/license-MIT-blue)]()
 
 **DCL** is a domain-specific programming language that unifies **Zero-Knowledge Proofs (ZKP)** and **Fully Homomorphic Encryption (FHE)** under a single, type-safe compiler. It uses **differentiable programming** (via JAX + Gumbel-Softmax) to automatically optimize constraint implementation strategies, and **Z3 SMT solving** to formally verify that optimizations preserve semantic correctness.
@@ -101,8 +101,14 @@ dcl fmt src/main.dcl
 |------|-------------|---------|
 | `Field` | BN254 prime field element | `let x: Field = 42;` |
 | `bool` | Boolean value | `let b: bool = true;` |
+| `u8` | Constrained unsigned 8-bit integer | `let age: u8 = 25;` |
+| `u16` | Constrained unsigned 16-bit integer | `let val: u16 = 1000;` |
+| `u32` | Constrained unsigned 32-bit integer | `let id: u32 = 12345;` |
+| `u64` | Constrained unsigned 64-bit integer | `let ts: u64 = 0;` |
 | `Field[N]` | Fixed-size array | `let arr: Field[4] = ...;` |
 | Struct | Named product type | `type Point = { x: Field, y: Field }` |
+
+> **Note**: Constrained integer types (`u8`..`u64`) are sugar for `Field` with automatic range-check insertion at the IR level. A `u8` parameter generates `Input + RangeCheck(8)` constraints.
 
 ### Visibility Modifiers
 
@@ -150,51 +156,34 @@ use std::utils;      // Range checks, select, assert helpers
 
 ## 🏗️ Architecture
 
+```mermaid
+graph TD
+    A["🔮 DCL Source (.dcl)"] --> B["📝 Frontend (Rust)"]
+    B --> |"Lexer → Parser → TypeChecker"| C["🔧 DCIR Graph"]
+    C --> |"Constant Fold + DCE + IFC"| D["🧠 Optimizer (JAX)"]
+    D --> |"Gumbel-Softmax + Adam"| E["🛡️ Verifier (Z3)"]
+    E --> |"BN254 Equivalence Check"| F{"Backend"}
+    F --> |"ZKP"| G["📄 Circom R1CS"]
+    F --> |"FHE"| H["🔒 TFHE-rs Rust"]
+    
+    style A fill:#667eea,stroke:#333,color:#fff
+    style B fill:#764ba2,stroke:#333,color:#fff
+    style C fill:#f093fb,stroke:#333,color:#fff
+    style D fill:#4facfe,stroke:#333,color:#fff
+    style E fill:#43e97b,stroke:#333,color:#fff
+    style G fill:#fa709a,stroke:#333,color:#fff
+    style H fill:#fee140,stroke:#333,color:#000
 ```
-DCL Source (.dcl)
-       │
-       ▼
-┌─────────────────┐
-│  Frontend        │  Lexer → Parser → TypeChecker
-│  (Rust)          │  • Block/line comments
-│                  │  • Hex literals, negation
-│                  │  • Error recovery
-│                  │  • "Did you mean?" suggestions
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  DCIR            │  DAG with strategy annotations
-│  (Rust)          │  • SSA branch merging (Select MUX)
-│                  │  • Conditional assertion lowering
-│                  │  • Function inlining
-│                  │  • Constant folding + DCE
-│                  │  • Information flow analysis
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  Optimizer       │  Gumbel-Softmax + Adam
-│  (Python/JAX)    │  • Cosine LR schedule
-│                  │  • Early stopping
-│                  │  • Topology-aware costs
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  Verifier        │  Z3 SMT solver
-│  (Python/Z3)     │  • BN254 field arithmetic
-│                  │  • Counterexample extraction
-│                  │  • Configurable timeout
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  Backend         │  Circom (ZKP) or TFHE-rs (FHE)
-│  (Rust)          │  • Auto noise management
-│                  │  • Bootstrap scheduling
-└─────────────────┘
-```
+
+### Compilation Pipeline
+
+| Stage | Language | Key Components |
+|:------|:---------|:---------------|
+| Frontend | Rust | Lexer, Parser (Pratt), TypeChecker, Formatter |
+| DCIR | Rust | DAG IR, SSA merging, constant fold, DCE, IFC analysis |
+| Optimizer | Python/JAX | Gumbel-Softmax, Adam, cosine LR, early stopping |
+| Verifier | Python/Z3 | BN254 field arithmetic, Poseidon uninterpreted functions |
+| Backend | Rust | Circom R1CS generation, TFHE-rs noise management |
 
 ## 🧪 Testing
 
@@ -224,11 +213,14 @@ dcl/
 ├── stdlib/
 │   ├── crypto.dcl        # Poseidon, Merkle, commitments
 │   ├── fixed.dcl         # Q16.16 fixed-point math
-│   ├── math.dcl          # Abs, min, max, pow, clamp
-│   ├── bits.dcl          # Bitwise operations
+│   ├── math.dcl          # abs_diff, min, max, pow, clamp, lerp
+│   ├── bits.dcl          # Bitwise AND, OR, XOR, NOT, NAND, MUX
+│   ├── hash.dcl          # Poseidon wrappers, commitments, nullifiers
+│   ├── comparators.dcl   # Equality, ordering, range assertions
 │   └── utils.dcl         # Range checks, select, assertions
 ├── examples/             # Example DCL programs
 ├── LANGUAGE_SPEC.md      # Formal language specification
+├── CHANGELOG.md          # Version history
 └── README.md             # This file
 ```
 

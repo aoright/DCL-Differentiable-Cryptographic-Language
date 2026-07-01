@@ -7,16 +7,18 @@ DCL is a domain-specific programming language designed to unify and optimize com
 ## 1. Lexical Grammar
 
 ### 1.1 Comments
-Single-line comments are supported using double forward slashes. They are ignored by the Lexer.
+Single-line comments are supported using double forward slashes. Multi-line block comments are supported using `/* */` and can be nested. Comments are ignored by the Lexer.
 ```dcl
-// This is a comment
+// This is a single-line comment
+/* This is a multi-line
+   block comment /* nested block comment */ */
 ```
 
 ### 1.2 Keywords
 The following terms are reserved keywords:
 - **Declarations**: `module`, `circuit`, `type`, `let`, `mut`, `extern`, `use`
 - **Control Flow**: `for`, `in`, `if`, `else`, `return`, `assert`
-- **Primitive Types**: `Field`, `bool`
+- **Primitive Types**: `Field`, `bool`, `u8`, `u16`, `u32`, `u64`
 - **Visibility Modifiers**: `public`, `private`, `shared`
 
 ### 1.3 Literals & Operators
@@ -54,6 +56,10 @@ Below is the Syntactic Grammar of DCL represented in BNF:
 
 <Type>          ::= "Field"
                   | "bool"
+                  | "u8"
+                  | "u16"
+                  | "u32"
+                  | "u64"
                   | <Ident>
                   | <Type> "[" <Number> "]"
 
@@ -76,6 +82,7 @@ DCL features a strong, static type system with type inference for local variable
 ### 3.1 Types
 - `Field`: Represents an element in the prime field $\mathbb{F}_p$ (specifically BN254 prime field for ZKP).
 - `bool`: Boolean values (`true`, `false`).
+- `u8/u16/u32/u64`: Constrained unsigned integer types. At the intermediate representation lowering layer, variables or parameters declared with these types automatically generate corresponding `RangeCheck(bits)` constraint assertions during initialization and value reassignment.
 - `Array`: Homogeneous sequences of fixed length, e.g., `Field[4]`.
 - `Struct`: Named, product type grouping key-value fields.
 

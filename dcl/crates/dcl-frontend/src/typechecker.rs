@@ -33,8 +33,50 @@ impl TypeChecker {
     }
 
     fn type_error(&mut self, span: Span, msg: &str) {
-        let err = format!("[Error at line {}, col {}]: {}", span.line(), span.col(), msg);
+        let code = if msg.contains("Duplicate type") {
+            "DCL-E101"
+        } else if msg.contains("Duplicate circuit") {
+            "DCL-E102"
+        } else if msg.contains("missing return statement") {
+            "DCL-E103"
+        } else if msg.contains("Cannot assign to immutable") {
+            "DCL-E104"
+        } else if msg.contains("type mismatch") 
+            || msg.contains("does not match") 
+            || msg.contains("must be Bool") 
+            || msg.contains("same type") 
+            || msg.contains("Bool operand") 
+            || msg.contains("Field operand") 
+            || msg.contains("require Field") 
+            || msg.contains("require Bool") 
+            || msg.contains("must be of type Field") 
+            || msg.contains("must be of type Bool")
+        {
+            "DCL-E105"
+        } else if msg.contains("Unknown struct type") || msg.contains("Unknown struct:") {
+            "DCL-E106"
+        } else if msg.contains("Undefined variable") || msg.contains("Unknown function") {
+            "DCL-E107"
+        } else if msg.contains("Unsupported integer bit width") {
+            "DCL-E110"
+        } else {
+            "DCL-E100" // General type error
+        };
+        let err = format!("[Error at line {}, col {}] [{}]: {}", span.line(), span.col(), code, msg);
         self.errors.push(err);
+    }
+
+    /// Check if two types are compatible.
+    /// Uint(n) is compatible with Field since Uint is a subtype of Field
+    /// (constrained to [0, 2^n) range).
+    fn types_compatible(&self, a: &Type, b: &Type) -> bool {
+        if a == b { return true; }
+        // Uint(n) is a subtype of Field
+        match (a, b) {
+            (Type::Uint(_), Type::Field) | (Type::Field, Type::Uint(_)) => true,
+            (Type::Uint(_), Type::Uint(_)) => true, // u8 and u32 are compatible (widening)
+            _ => false,
+        }
     }
 
     /// Check an entire module for type correctness.
@@ -122,8 +164,15 @@ impl TypeChecker {
             self.check_statement(stmt, circuit, &mut return_type);
         }
 
-        if return_type.is_none() && circuit.return_ty != Type::Bool {
-            self.type_error(circuit.span, &format!("Circuit '{}' missing return statement", circuit.name));
+        if return_type.is_none() && !circuit.body.is_empty() {
+            // Only allow omitting return for circuits with assert-only bodies
+            let has_return = circuit.body.iter().any(|s| matches!(s, Stmt::Return(_, _)));
+            if !has_return {
+                let has_assert = circuit.body.iter().any(|s| matches!(s, Stmt::Assert(_, _)));
+                if !has_assert {
+                    self.type_error(circuit.span, &format!("Circuit '{}' missing return statement", circuit.name));
+                }
+            }
         }
     }
 
@@ -133,7 +182,7 @@ impl TypeChecker {
                 let expr_ty = self.infer_expr_type(expr);
                 if let Some(declared_ty) = opt_ty {
                     self.validate_type(declared_ty, *span);
-                    if *declared_ty != expr_ty {
+                    if !self.types_compatible(declared_ty, &expr_ty) {
                         self.type_error(*span, &format!(
                             "Declared type {:?} does not match expression type {:?}",
                             declared_ty, expr_ty
@@ -246,6 +295,13 @@ impl TypeChecker {
     fn validate_type(&mut self, ty: &Type, span: Span) {
         match ty {
             Type::Field | Type::Bool => {}
+            Type::Uint(bits) => {
+                if !matches!(bits, 8 | 16 | 32 | 64) {
+                    self.type_error(span, &format!(
+                        "Unsupported integer bit width: u{}. Supported: u8, u16, u32, u64", bits
+                    ));
+                }
+            }
             Type::Struct(name) => {
                 if !self.structs.contains_key(name) {
                     let suggestion = self.suggest_similar_struct(name);

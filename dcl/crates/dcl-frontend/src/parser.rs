@@ -53,7 +53,7 @@ impl Parser {
         let span = self.peek_span();
         match self.next_token() {
             Some(tok) if tok == expected => Ok(()),
-            other => Err(format!("[Error at line {}, col {}]: Expected {:?}, found {:?}", span.line(), span.col(), expected, other)),
+            other => Err(format!("[Error at line {}, col {}] [DCL-E201]: Expected {:?}, found {:?}", span.line(), span.col(), expected, other)),
         }
     }
 
@@ -85,8 +85,8 @@ impl Parser {
                 let span = self.peek_span();
                 let len_tok = self.next_token().ok_or("Expected array size")?;
                 let len = match len_tok {
-                    Token::Num(s) => s.parse::<usize>().map_err(|_| format!("[Error at line {}, col {}]: Invalid array size: {}", span.line(), span.col(), s))?,
-                    other => return Err(format!("[Error at line {}, col {}]: Expected number for array size, found {:?}", span.line(), span.col(), other)),
+                    Token::Num(s) => s.parse::<usize>().map_err(|_| format!("[Error at line {}, col {}] [DCL-E201]: Invalid array size: {}", span.line(), span.col(), s))?,
+                    other => return Err(format!("[Error at line {}, col {}] [DCL-E201]: Expected number for array size, found {:?}", span.line(), span.col(), other)),
                 };
                 self.expect(Token::RBracket)?;
                 Ok(Type::Array(Box::new(inner_ty), len))
@@ -97,8 +97,12 @@ impl Parser {
                 let base_ty = match base_tok {
                     Token::FieldTy => Type::Field,
                     Token::BoolTy => Type::Bool,
+                    Token::U8Ty => Type::Uint(8),
+                    Token::U16Ty => Type::Uint(16),
+                    Token::U32Ty => Type::Uint(32),
+                    Token::U64Ty => Type::Uint(64),
                     Token::Ident(name) => Type::Struct(name),
-                    other => return Err(format!("[Error at line {}, col {}]: Expected type keyword or identifier, found {:?}", span.line(), span.col(), other)),
+                    other => return Err(format!("[Error at line {}, col {}] [DCL-E201]: Expected type keyword or identifier, found {:?}", span.line(), span.col(), other)),
                 };
 
                 if self.peek() == Some(&Token::LBracket) {
@@ -106,8 +110,8 @@ impl Parser {
                     let len_span = self.peek_span();
                     let len_tok = self.next_token().ok_or("Expected array size")?;
                     let len = match len_tok {
-                        Token::Num(s) => s.parse::<usize>().map_err(|_| format!("[Error at line {}, col {}]: Invalid array size: {}", len_span.line(), len_span.col(), s))?,
-                        other => return Err(format!("[Error at line {}, col {}]: Expected number for array size, found {:?}", len_span.line(), len_span.col(), other)),
+                        Token::Num(s) => s.parse::<usize>().map_err(|_| format!("[Error at line {}, col {}] [DCL-E201]: Invalid array size: {}", len_span.line(), len_span.col(), s))?,
+                        other => return Err(format!("[Error at line {}, col {}] [DCL-E201]: Expected number for array size, found {:?}", len_span.line(), len_span.col(), other)),
                     };
                     self.expect(Token::RBracket)?;
                     Ok(Type::Array(Box::new(base_ty), len))
@@ -126,7 +130,7 @@ impl Parser {
         let name_tok = self.next_token().ok_or("Expected module name")?;
         match name_tok {
             Token::Ident(name) => path.push(name),
-            other => return Err(format!("[Error at line {}, col {}]: Expected module identifier, found {:?}", span.line(), span.col(), other)),
+            other => return Err(format!("[Error at line {}, col {}] [DCL-E201]: Expected module identifier, found {:?}", span.line(), span.col(), other)),
         }
         while self.peek() == Some(&Token::DoubleColon) {
             self.next_token(); // consume '::'
@@ -134,7 +138,7 @@ impl Parser {
             let next_tok = self.next_token().ok_or("Expected identifier after '::'")?;
             match next_tok {
                 Token::Ident(name) => path.push(name),
-                other => return Err(format!("[Error at line {}, col {}]: Expected identifier, found {:?}", next_span.line(), next_span.col(), other)),
+                other => return Err(format!("[Error at line {}, col {}] [DCL-E201]: Expected identifier, found {:?}", next_span.line(), next_span.col(), other)),
             }
         }
         let module_name = path.join("::");
@@ -156,7 +160,7 @@ impl Parser {
                     let first_tok = self.next_token().ok_or("Expected identifier in import path")?;
                     match first_tok {
                         Token::Ident(name) => path.push(name),
-                        other => return Err(format!("[Error at line {}, col {}]: Expected identifier, found {:?}", first_span.line(), first_span.col(), other)),
+                        other => return Err(format!("[Error at line {}, col {}] [DCL-E201]: Expected identifier, found {:?}", first_span.line(), first_span.col(), other)),
                     }
                     while self.peek() == Some(&Token::DoubleColon) {
                         self.next_token(); // consume '::'
@@ -164,7 +168,7 @@ impl Parser {
                         let next_tok = self.next_token().ok_or("Expected identifier after '::'")?;
                         match next_tok {
                             Token::Ident(name) => path.push(name),
-                            other => return Err(format!("[Error at line {}, col {}]: Expected identifier, found {:?}", next_span.line(), next_span.col(), other)),
+                            other => return Err(format!("[Error at line {}, col {}] [DCL-E201]: Expected identifier, found {:?}", next_span.line(), next_span.col(), other)),
                         }
                     }
                     if self.peek() == Some(&Token::Semicolon) {
@@ -198,7 +202,7 @@ impl Parser {
                         }
                     }
                 }
-                other => return Err(format!("[Error at line {}, col {}]: Expected 'use', 'type', 'extern', or 'circuit', found {:?}", self.peek_span().line(), self.peek_span().col(), other)),
+                other => return Err(format!("[Error at line {}, col {}] [DCL-E201]: Expected 'use', 'type', 'extern', or 'circuit', found {:?}", self.peek_span().line(), self.peek_span().col(), other)),
             }
         }
 
@@ -219,7 +223,7 @@ impl Parser {
         let name_tok = self.next_token().ok_or("Expected struct name")?;
         let name = match name_tok {
             Token::Ident(n) => n,
-            other => return Err(format!("[Error at line {}, col {}]: Expected struct identifier, found {:?}", span.line(), span.col(), other)),
+            other => return Err(format!("[Error at line {}, col {}] [DCL-E201]: Expected struct identifier, found {:?}", span.line(), span.col(), other)),
         };
 
         self.expect(Token::Eq)?;
@@ -231,7 +235,7 @@ impl Parser {
             let field_name_tok = self.next_token().ok_or("Expected field name")?;
             let field_name = match field_name_tok {
                 Token::Ident(n) => n,
-                other => return Err(format!("[Error at line {}, col {}]: Expected field identifier, found {:?}", field_span.line(), field_span.col(), other)),
+                other => return Err(format!("[Error at line {}, col {}] [DCL-E201]: Expected field identifier, found {:?}", field_span.line(), field_span.col(), other)),
             };
 
             self.expect(Token::Colon)?;
@@ -242,7 +246,7 @@ impl Parser {
             if self.peek() == Some(&Token::Comma) {
                 self.next_token();
             } else if self.peek() != Some(&Token::RBrace) {
-                return Err(format!("[Error at line {}, col {}]: Expected ',' or '}}', found {:?}", self.peek_span().line(), self.peek_span().col(), self.peek()));
+                return Err(format!("[Error at line {}, col {}] [DCL-E201]: Expected ',' or '}}', found {:?}", self.peek_span().line(), self.peek_span().col(), self.peek()));
             }
         }
         self.expect(Token::RBrace)?;
@@ -255,7 +259,7 @@ impl Parser {
         let name_tok = self.next_token().ok_or("Expected circuit name")?;
         let name = match name_tok {
             Token::Ident(n) => n,
-            other => return Err(format!("[Error at line {}, col {}]: Expected circuit identifier, found {:?}", span.line(), span.col(), other)),
+            other => return Err(format!("[Error at line {}, col {}] [DCL-E201]: Expected circuit identifier, found {:?}", span.line(), span.col(), other)),
         };
 
         self.expect(Token::LParen)?;
@@ -281,7 +285,7 @@ impl Parser {
             let param_name_tok = self.next_token().ok_or("Expected parameter name")?;
             let param_name = match param_name_tok {
                 Token::Ident(n) => n,
-                other => return Err(format!("[Error at line {}, col {}]: Expected parameter identifier, found {:?}", param_span.line(), param_span.col(), other)),
+                other => return Err(format!("[Error at line {}, col {}] [DCL-E201]: Expected parameter identifier, found {:?}", param_span.line(), param_span.col(), other)),
             };
 
             self.expect(Token::Colon)?;
@@ -296,7 +300,7 @@ impl Parser {
             if self.peek() == Some(&Token::Comma) {
                 self.next_token();
             } else if self.peek() != Some(&Token::RParen) {
-                return Err(format!("[Error at line {}, col {}]: Expected ',' or ')', found {:?}", self.peek_span().line(), self.peek_span().col(), self.peek()));
+                return Err(format!("[Error at line {}, col {}] [DCL-E201]: Expected ',' or ')', found {:?}", self.peek_span().line(), self.peek_span().col(), self.peek()));
             }
         }
         self.expect(Token::RParen)?;
@@ -350,7 +354,7 @@ impl Parser {
                 let var_name_tok = self.next_token().ok_or("Expected variable name")?;
                 let var_name = match var_name_tok {
                     Token::Ident(n) => n,
-                    other => return Err(format!("[Error at line {}, col {}]: Expected identifier after 'let', found {:?}", var_span.line(), var_span.col(), other)),
+                    other => return Err(format!("[Error at line {}, col {}] [DCL-E201]: Expected identifier after 'let', found {:?}", var_span.line(), var_span.col(), other)),
                 };
 
                 let mut var_ty = None;
@@ -379,7 +383,7 @@ impl Parser {
                 let var_tok = self.next_token().ok_or("Expected loop variable name")?;
                 let var_name = match var_tok {
                     Token::Ident(n) => n,
-                    other => return Err(format!("[Error at line {}, col {}]: Expected loop variable identifier, found {:?}", var_span.line(), var_span.col(), other)),
+                    other => return Err(format!("[Error at line {}, col {}] [DCL-E201]: Expected loop variable identifier, found {:?}", var_span.line(), var_span.col(), other)),
                 };
                 self.expect(Token::In)?;
                 let start_expr = self.parse_expr()?;
@@ -420,7 +424,7 @@ impl Parser {
                         let stmt = self.parse_statement()?;
                         else_body = Some(vec![stmt]);
                     } else {
-                        return Err(format!("[Error at line {}, col {}]: Expected '{{' or 'if' after 'else'", self.peek_span().line(), self.peek_span().col()));
+                        return Err(format!("[Error at line {}, col {}] [DCL-E201]: Expected '{{' or 'if' after 'else'", self.peek_span().line(), self.peek_span().col()));
                     }
                 }
 
@@ -526,7 +530,7 @@ impl Parser {
                     let next_tok = self.next_token().ok_or("Expected identifier after '::'")?;
                     match next_tok {
                         Token::Ident(n) => path.push(n),
-                        other => return Err(format!("[Error at line {}, col {}]: Expected identifier, found {:?}", next_span.line(), next_span.col(), other)),
+                        other => return Err(format!("[Error at line {}, col {}] [DCL-E201]: Expected identifier, found {:?}", next_span.line(), next_span.col(), other)),
                     }
                 }
 
@@ -539,7 +543,7 @@ impl Parser {
                         if self.peek() == Some(&Token::Comma) {
                             self.next_token();
                         } else if self.peek() != Some(&Token::RParen) {
-                            return Err(format!("[Error at line {}, col {}]: Expected ',' or ')', found {:?}", self.peek_span().line(), self.peek_span().col(), self.peek()));
+                            return Err(format!("[Error at line {}, col {}] [DCL-E201]: Expected ',' or ')', found {:?}", self.peek_span().line(), self.peek_span().col(), self.peek()));
                         }
                     }
                     self.expect(Token::RParen)?;
@@ -556,7 +560,7 @@ impl Parser {
                 self.expect(Token::RParen)?;
                 e
             }
-            other => return Err(format!("[Error at line {}, col {}]: Unexpected token in expression: {:?}", span.line(), span.col(), other)),
+            other => return Err(format!("[Error at line {}, col {}] [DCL-E201]: Unexpected token in expression: {:?}", span.line(), span.col(), other)),
         };
 
         // Post-fix: field access and array indexing
@@ -568,7 +572,7 @@ impl Parser {
                 let field_tok = self.next_token().ok_or("Expected field identifier after '.'")?;
                 let field_name = match field_tok {
                     Token::Ident(n) => n,
-                    other => return Err(format!("[Error at line {}, col {}]: Expected field identifier, found {:?}", field_span.line(), field_span.col(), other)),
+                    other => return Err(format!("[Error at line {}, col {}] [DCL-E201]: Expected field identifier, found {:?}", field_span.line(), field_span.col(), other)),
                 };
                 let merged = current_span.merge(&field_span);
                 expr = Expr::Access(Box::new(expr), field_name, merged);

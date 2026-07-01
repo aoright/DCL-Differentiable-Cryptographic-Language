@@ -74,7 +74,9 @@ def translate_graph_to_z3(graph: dict, prefix: str, timeout_ms: int = 30000):
         elif ntype == 'const':
             val_str = node.get('value', '0')
             try:
-                val = int(float(val_str))
+                # Use int() directly to preserve full precision for large field constants.
+                # int(float(x)) would lose precision for values > 2^53.
+                val = int(val_str)
             except (ValueError, OverflowError):
                 val = 0
             assertions.append(var == val % BN254_PRIME)

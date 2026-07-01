@@ -537,7 +537,7 @@ fn test_detailed_spanned_errors() {
     let mut checker = TypeChecker::new();
     let err = checker.check_module(&module).unwrap_err();
 
-    assert!(err.contains("[Error at line 5, col 13]: Assertion expression must be Bool, found Field"));
+    assert!(err.contains("[Error at line 5, col 13] [DCL-E105]: Assertion expression must be Bool, found Field"));
 }
 
 #[test]
@@ -609,7 +609,7 @@ fn test_immutable_assign_error() {
     let module = parser.parse_module().unwrap();
     let mut checker = TypeChecker::new();
     let err = checker.check_module(&module).unwrap_err();
-    assert!(err.contains("[Error at line 4, col 1]: Cannot assign to immutable variable: y"));
+    assert!(err.contains("[Error at line 4, col 1] [DCL-E104]: Cannot assign to immutable variable: y"));
 }
 
 #[test]
@@ -621,7 +621,7 @@ fn test_duplicate_type_error() {
     let module = parser.parse_module().unwrap();
     let mut checker = TypeChecker::new();
     let err = checker.check_module(&module).unwrap_err();
-    assert!(err.contains("[Error at line 3, col 6]: Duplicate type definition: A"));
+    assert!(err.contains("[Error at line 3, col 6] [DCL-E101]: Duplicate type definition: A"));
 }
 
 #[test]
@@ -633,7 +633,7 @@ fn test_duplicate_circuit_error() {
     let module = parser.parse_module().unwrap();
     let mut checker = TypeChecker::new();
     let err = checker.check_module(&module).unwrap_err();
-    assert!(err.contains("[Error at line 3, col 9]: Duplicate circuit definition: foo"));
+    assert!(err.contains("[Error at line 3, col 9] [DCL-E102]: Duplicate circuit definition: foo"));
 }
 
 // ============================================================

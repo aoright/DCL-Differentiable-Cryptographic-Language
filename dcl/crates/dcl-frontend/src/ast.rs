@@ -53,6 +53,10 @@ pub enum Type {
     Field,
     /// Boolean value.
     Bool,
+    /// Constrained unsigned integer type with explicit bit width.
+    /// Compiles down to Field + range_check(bits) at the IR level.
+    /// Supported widths: 8, 16, 32, 64.
+    Uint(usize),
     /// User-defined struct type, referenced by name.
     Struct(String),
     /// Fixed-size homogeneous array.

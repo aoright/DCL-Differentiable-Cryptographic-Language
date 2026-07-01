@@ -70,7 +70,7 @@ fn main() {
     match cli.command {
         Commands::Check { input } => {
             if let Err(e) = run_check(&input) {
-                eprintln!("❌ Check failed:\n{}", e);
+                print_error_with_source_context(&e, &input);
                 std::process::exit(1);
             }
             println!("✅ Syntax and type checking passed successfully!");
@@ -84,7 +84,7 @@ fn main() {
             });
 
             if let Err(e) = run_compile(&input, &output_path, &backend, epochs, verbose, emit_ir) {
-                eprintln!("❌ Compilation failed:\n{}", e);
+                print_error_with_source_context(&e, &input);
                 std::process::exit(1);
             }
             println!("✅ Compilation and optimization completed successfully!");
@@ -92,7 +92,7 @@ fn main() {
         }
         Commands::Fmt { input } => {
             if let Err(e) = run_fmt(&input) {
-                eprintln!("❌ Formatting failed:\n{}", e);
+                print_error_with_source_context(&e, &input);
                 std::process::exit(1);
             }
             println!("✅ File formatted successfully: {}", input);
@@ -250,6 +250,9 @@ fn run_compile(input_path: &str, output_path: &str, backend: &str, epochs: usize
 
     // 2.5 Run optimization passes
     graph.constant_fold();
+    graph.algebraic_simplify();
+    graph.constant_fold();
+    graph.cse();
     graph.dead_code_eliminate();
 
     // 2.6 Security analysis
@@ -447,4 +450,50 @@ fn find_workspace_root() -> PathBuf {
     }
 
     PathBuf::from(".")
+}
+
+/// Print formatted error with source code context pointing to the line/col of the failure.
+fn print_error_with_source_context(err_msg: &str, file_path: &str) {
+    let content = match fs::read_to_string(file_path) {
+        Ok(c) => c,
+        Err(_) => {
+            eprintln!("{}", err_msg);
+            return;
+        }
+    };
+    let lines: Vec<&str> = content.lines().collect();
+
+    for single_err in err_msg.lines() {
+        if single_err.trim().is_empty() {
+            continue;
+        }
+        
+        if let Some(start_idx) = single_err.find("[Error at line ") {
+            let sub = &single_err[start_idx + "[Error at line ".len()..];
+            if let Some(comma_idx) = sub.find(", col ") {
+                let line_str = &sub[..comma_idx];
+                let sub2 = &sub[comma_idx + ", col ".len()..];
+                if let Some(end_bracket_idx) = sub2.find(']') {
+                    let col_str = &sub2[..end_bracket_idx];
+                    
+                    if let (Ok(line_num), Ok(col_num)) = (line_str.parse::<usize>(), col_str.parse::<usize>()) {
+                        eprintln!("\n❌ {}", single_err);
+                        eprintln!("   --> {}:{}:{}", file_path, line_num, col_num);
+                        
+                        if line_num > 0 && line_num <= lines.len() {
+                            let line_code = lines[line_num - 1];
+                            eprintln!("    |");
+                            eprintln!("{:3} | {}", line_num, line_code);
+                            let spaces = " ".repeat(col_num.saturating_sub(1));
+                            eprintln!("    | {}^", spaces);
+                            eprintln!("    |");
+                        }
+                        continue;
+                    }
+                }
+            }
+        }
+        
+        eprintln!("{}", single_err);
+    }
 }

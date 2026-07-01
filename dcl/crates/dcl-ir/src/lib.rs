@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use dcl_frontend::ast::{self, Module, Circuit, Stmt, Expr, BinOp, UnOp, Type, Visibility as ASTVisibility};
 
 /// Types of computation nodes in the DCIR graph.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum NodeType {
     Const,
@@ -40,6 +40,9 @@ pub enum NodeType {
 pub enum Visibility {
     Public,
     Private,
+    /// Shared input: known to multiple provers in MPC (multi-party computation).
+    /// Treated as secret for information flow analysis since it is not fully public.
+    Shared,
 }
 
 /// An implementation strategy for a node, with associated cost metrics.
@@ -116,7 +119,9 @@ impl Graph {
         for node in &self.nodes {
             let node_secrecy = match node.node_type {
                 NodeType::Input => {
-                    if node.visibility == Some(Visibility::Private) {
+                    if node.visibility == Some(Visibility::Private)
+                        || node.visibility == Some(Visibility::Shared)
+                    {
                         Secrecy::Secret
                     } else {
                         Secrecy::Public
@@ -195,6 +200,35 @@ impl Graph {
             }
         }
 
+        // 5. Division-by-zero risk detection
+        for node in &self.nodes {
+            if node.node_type == NodeType::Div {
+                if node.inputs.len() == 2 {
+                    let divisor_id = node.inputs[1];
+                    // Check if divisor is a constant zero
+                    if let Some(divisor_node) = node_map.get(&divisor_id) {
+                        if divisor_node.node_type == NodeType::Const {
+                            if divisor_node.value.as_deref() == Some("0") {
+                                let msg = format!(
+                                    "❌ [Security Error]: Division by constant zero at node '{}' in circuit '{}'. This will cause a constraint failure.",
+                                    node.label, self.name
+                                );
+                                diagnostics.push(msg.clone());
+                                eprintln!("{}", msg);
+                            }
+                        } else if divisor_node.node_type == NodeType::Input {
+                            let msg = format!(
+                                "⚠️  [Security Warning]: Division by input signal '{}' at node '{}' in circuit '{}'. A malicious prover could provide a zero divisor to cause undefined behavior. Consider adding an assert_nonzero guard.",
+                                divisor_node.label, node.label, self.name
+                            );
+                            diagnostics.push(msg.clone());
+                            eprintln!("{}", msg);
+                        }
+                    }
+                }
+            }
+        }
+
         diagnostics
     }
 
@@ -205,7 +239,9 @@ impl Graph {
         };
 
         if node.node_type == NodeType::Input {
-            if node.visibility == Some(Visibility::Private) {
+            if node.visibility == Some(Visibility::Private)
+            || node.visibility == Some(Visibility::Shared)
+        {
                 leaking.insert(node.label.clone());
             }
             return;
@@ -221,6 +257,7 @@ impl Graph {
     /// Constant folding: replace sub-expressions with compile-time known values.
     ///
     /// Evaluates arithmetic on constant nodes: `Const(2) + Const(3)` → `Const(5)`.
+    /// Also folds: `Div` (integer division), `IsZero` (equality to zero check).
     pub fn constant_fold(&mut self) {
         let mut changed = true;
         while changed {
@@ -233,6 +270,8 @@ impl Graph {
 
             for node in self.nodes.iter_mut() {
                 if node.node_type == NodeType::Const { continue; }
+
+                // Fold binary operations: Add, Sub, Mul, Div
                 if node.inputs.len() == 2 {
                     let a = val_map.get(&node.inputs[0]).and_then(|s| s.parse::<i128>().ok());
                     let b = val_map.get(&node.inputs[1]).and_then(|s| s.parse::<i128>().ok());
@@ -241,6 +280,7 @@ impl Graph {
                             NodeType::Add => Some(va + vb),
                             NodeType::Sub => Some(va - vb),
                             NodeType::Mul => Some(va * vb),
+                            NodeType::Div if vb != 0 => Some(va / vb),
                             _ => None,
                         };
                         if let Some(r) = result {
@@ -252,12 +292,170 @@ impl Graph {
                         }
                     }
                 }
+
+                // Fold unary operations: IsZero
+                if node.inputs.len() == 1 && node.node_type == NodeType::IsZero {
+                    if let Some(val_str) = val_map.get(&node.inputs[0]) {
+                        if let Ok(v) = val_str.parse::<i128>() {
+                            let result = if v == 0 { 1 } else { 0 };
+                            node.node_type = NodeType::Const;
+                            node.inputs.clear();
+                            node.value = Some(result.to_string());
+                            node.label = format!("const_folded_iszero_{}", result);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Algebraic simplifications: simplifies expressions like x+0, x-0, x*1, x*0, x/1.
+    pub fn algebraic_simplify(&mut self) {
+        let mut changed = true;
+        let mut replaced = HashSet::new();
+        while changed {
+            changed = false;
+            let const_map: HashMap<usize, String> = self.nodes.iter()
+                .filter(|n| n.node_type == NodeType::Const)
+                .filter_map(|n| n.value.as_ref().map(|v| (n.id, v.clone())))
+                .collect();
+
+            let mut replacements = HashMap::new();
+
+            for node in &self.nodes {
+                if replaced.contains(&node.id) {
+                    continue;
+                }
+                if node.node_type == NodeType::Const {
+                    continue;
+                }
+
+                if node.inputs.len() == 2 {
+                    let a = node.inputs[0];
+                    let b = node.inputs[1];
+                    let a_val = const_map.get(&a).map(|s| s.as_str());
+                    let b_val = const_map.get(&b).map(|s| s.as_str());
+
+                    match node.node_type {
+                        NodeType::Add => {
+                            if a_val == Some("0") {
+                                replacements.insert(node.id, b);
+                                replaced.insert(node.id);
+                                changed = true;
+                            } else if b_val == Some("0") {
+                                replacements.insert(node.id, a);
+                                replaced.insert(node.id);
+                                changed = true;
+                            }
+                        }
+                        NodeType::Sub => {
+                            if b_val == Some("0") {
+                                replacements.insert(node.id, a);
+                                replaced.insert(node.id);
+                                changed = true;
+                            }
+                        }
+                        NodeType::Mul => {
+                            if a_val == Some("1") {
+                                replacements.insert(node.id, b);
+                                replaced.insert(node.id);
+                                changed = true;
+                            } else if b_val == Some("1") {
+                                replacements.insert(node.id, a);
+                                replaced.insert(node.id);
+                                changed = true;
+                            } else if a_val == Some("0") {
+                                replacements.insert(node.id, a); // replace with 0 node
+                                replaced.insert(node.id);
+                                changed = true;
+                            } else if b_val == Some("0") {
+                                replacements.insert(node.id, b); // replace with 0 node
+                                replaced.insert(node.id);
+                                changed = true;
+                            }
+                        }
+                        NodeType::Div => {
+                            if b_val == Some("1") {
+                                replacements.insert(node.id, a);
+                                replaced.insert(node.id);
+                                changed = true;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            if changed {
+                for node in &mut self.nodes {
+                    for input in &mut node.inputs {
+                        if let Some(&new_id) = replacements.get(input) {
+                            *input = new_id;
+                        }
+                    }
+                }
+                for output in &mut self.outputs {
+                    if let Some(&new_id) = replacements.get(output) {
+                        *output = new_id;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Common Subexpression Elimination (CSE): Merges nodes that perform the exact same
+    /// operation on the exact same inputs, then sweeps unused duplicate nodes.
+    pub fn cse(&mut self) {
+        let mut changed = true;
+        while changed {
+            changed = false;
+            let mut replacements = HashMap::new();
+            let mut seen: HashMap<(NodeType, Vec<usize>, Option<String>, Option<usize>), usize> = HashMap::new();
+
+            for node in &self.nodes {
+                // Ignore Input and Const nodes to preserve distinct input/const variables
+                if node.node_type == NodeType::Input || node.node_type == NodeType::Const {
+                    continue;
+                }
+
+                let sig = (node.node_type.clone(), node.inputs.clone(), node.value.clone(), node.bits);
+                if let Some(&first_id) = seen.get(&sig) {
+                    replacements.insert(node.id, first_id);
+                    changed = true;
+                } else {
+                    seen.insert(sig, node.id);
+                }
+            }
+
+            if changed {
+                for node in &mut self.nodes {
+                    for input in &mut node.inputs {
+                        if let Some(&new_id) = replacements.get(input) {
+                            *input = new_id;
+                        }
+                    }
+                }
+                for output in &mut self.outputs {
+                    if let Some(&new_id) = replacements.get(output) {
+                        *output = new_id;
+                    }
+                }
+                self.dead_code_eliminate();
             }
         }
     }
 
     /// Dead code elimination: remove nodes not reachable from outputs or assertions.
+    ///
+    /// Uses HashMap for O(1) node lookup and BFS from live roots.
     pub fn dead_code_eliminate(&mut self) {
+        // Build O(1) node index
+        let node_index: HashMap<usize, usize> = self.nodes.iter()
+            .enumerate()
+            .map(|(idx, n)| (n.id, idx))
+            .collect();
+
         let mut live: HashSet<usize> = HashSet::new();
         let mut worklist: Vec<usize> = self.outputs.clone();
 
@@ -268,11 +466,11 @@ impl Graph {
             }
         }
 
-        // BFS from live roots
+        // BFS from live roots using HashMap for O(1) lookup
         while let Some(id) = worklist.pop() {
             if !live.insert(id) { continue; }
-            if let Some(node) = self.nodes.iter().find(|n| n.id == id) {
-                for &inp in &node.inputs {
+            if let Some(&idx) = node_index.get(&id) {
+                for &inp in &self.nodes[idx].inputs {
                     worklist.push(inp);
                 }
             }
@@ -294,6 +492,7 @@ pub struct Lowerer {
     circuits: HashMap<String, ast::Circuit>,
     condition_stack: Vec<usize>,
     current_line: Option<usize>,
+    variable_types: HashMap<String, Type>,
 }
 
 impl Lowerer {
@@ -314,6 +513,7 @@ impl Lowerer {
             circuits,
             condition_stack: Vec::new(),
             current_line: None,
+            variable_types: HashMap::new(),
         }
     }
 
@@ -368,7 +568,8 @@ impl Lowerer {
         for param in &circuit.params {
             let vis = match param.visibility {
                 ASTVisibility::Public => Visibility::Public,
-                _ => Visibility::Private,
+                ASTVisibility::Shared => Visibility::Shared,
+                ASTVisibility::Private => Visibility::Private,
             };
             self.lower_parameter(&param.name, &param.ty, vis)?;
         }
@@ -389,8 +590,27 @@ impl Lowerer {
     fn lower_statement(&mut self, stmt: &Stmt, outputs: &mut Vec<usize>) -> Result<(), String> {
         self.current_line = Some(stmt.span().line());
         match stmt {
-            Stmt::Let(name, _is_mut, _, expr, _) => {
+            Stmt::Let(name, _is_mut, opt_ty, expr, _) => {
                 let val_id = self.lower_expr(expr)?;
+                if let Some(ty) = opt_ty {
+                    self.variable_types.insert(name.clone(), ty.clone());
+                    if let Type::Uint(bits) = ty {
+                        let rc_id = self.alloc_id();
+                        let strats = range_check_strategies(*bits);
+                        self.nodes.push(Node {
+                            id: rc_id,
+                            node_type: NodeType::RangeCheck,
+                            inputs: vec![val_id],
+                            strategies: strats,
+                            alpha: Some(vec![0.0; 3]),
+                            value: None,
+                            bits: Some(*bits),
+                            visibility: None,
+                            label: format!("{}_range_check_u{}", name, bits),
+                            line: self.current_line,
+                        });
+                    }
+                }
                 self.env.insert(name.clone(), val_id);
             }
             Stmt::Assert(expr, _) => {
@@ -414,6 +634,27 @@ impl Lowerer {
             Stmt::Assign(lhs, rhs, _) => {
                 let rhs_id = self.lower_expr(rhs)?;
                 let path = self.resolve_path(lhs)?;
+                let opt_bits = if let Some(Type::Uint(bits)) = self.variable_types.get(&path) {
+                    Some(*bits)
+                } else {
+                    None
+                };
+                if let Some(bits) = opt_bits {
+                    let rc_id = self.alloc_id();
+                    let strats = range_check_strategies(bits);
+                    self.nodes.push(Node {
+                        id: rc_id,
+                        node_type: NodeType::RangeCheck,
+                        inputs: vec![rhs_id],
+                        strategies: strats,
+                        alpha: Some(vec![0.0; 3]),
+                        value: None,
+                        bits: Some(bits),
+                        visibility: None,
+                        label: format!("{}_assign_range_check_u{}", path, bits),
+                        line: self.current_line,
+                    });
+                }
                 self.env.insert(path, rhs_id);
             }
             Stmt::Return(expr, _) => {
@@ -634,6 +875,40 @@ impl Lowerer {
                     line: self.current_line,
                 });
                 self.env.insert(name.to_string(), id);
+                self.variable_types.insert(name.to_string(), ty.clone());
+            }
+            Type::Uint(bits) => {
+                // Uint(n) is lowered as Input + automatic RangeCheck
+                let id = self.alloc_id();
+                self.nodes.push(Node {
+                    id,
+                    node_type: NodeType::Input,
+                    inputs: Vec::new(),
+                    strategies: Vec::new(),
+                    alpha: None,
+                    value: None,
+                    bits: Some(*bits),
+                    visibility: Some(vis),
+                    label: name.to_string(),
+                    line: self.current_line,
+                });
+                // Automatically insert range check constraint
+                let rc_id = self.alloc_id();
+                let strats = range_check_strategies(*bits);
+                self.nodes.push(Node {
+                    id: rc_id,
+                    node_type: NodeType::RangeCheck,
+                    inputs: vec![id],
+                    strategies: strats,
+                    alpha: Some(vec![0.0; 3]),
+                    value: None,
+                    bits: Some(*bits),
+                    visibility: None,
+                    label: format!("{}_range_check_u{}", name, bits),
+                    line: self.current_line,
+                });
+                self.env.insert(name.to_string(), id);
+                self.variable_types.insert(name.to_string(), ty.clone());
             }
             Type::Struct(sname) => {
                 let def = self.struct_defs.get(sname).ok_or_else(|| format!("Unknown struct: {}", sname))?.clone();
@@ -1120,4 +1395,367 @@ fn poseidon_strategies(num_inputs: usize) -> Vec<Strategy> {
             noise_cost: (base_full * 3.0 + base_partial) * 1.2,
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dcl_frontend::lexer::Lexer;
+    use dcl_frontend::parser::Parser;
+
+    /// Helper: compile DCL source to a DCIR Graph.
+    fn compile_to_graph(src: &str) -> Graph {
+        let mut lexer = Lexer::new(src);
+        let tokens = lexer.tokenize().unwrap();
+        let mut parser = Parser::new(tokens);
+        let module = parser.parse_module().unwrap();
+        let mut lowerer = Lowerer::new(&module);
+        lowerer.lower_circuit(&module.circuits[0]).unwrap()
+    }
+
+    // ========== Constant Folding Tests ==========
+
+    #[test]
+    fn test_constant_fold_add() {
+        let src = "module Test\ncircuit main(private x: Field) -> Field { let y = 2 + 3; return x + y; }";
+        let mut graph = compile_to_graph(src);
+        graph.constant_fold();
+        // After folding, there should be a Const node with value "5"
+        let has_five = graph.nodes.iter().any(|n| n.node_type == NodeType::Const && n.value.as_deref() == Some("5"));
+        assert!(has_five, "Constant folding should reduce 2+3 to 5");
+    }
+
+    #[test]
+    fn test_constant_fold_mul() {
+        let src = "module Test\ncircuit main(private x: Field) -> Field { let y = 4 * 7; return x + y; }";
+        let mut graph = compile_to_graph(src);
+        graph.constant_fold();
+        let has_28 = graph.nodes.iter().any(|n| n.node_type == NodeType::Const && n.value.as_deref() == Some("28"));
+        assert!(has_28, "Constant folding should reduce 4*7 to 28");
+    }
+
+    #[test]
+    fn test_constant_fold_sub() {
+        let src = "module Test\ncircuit main(private x: Field) -> Field { let y = 10 - 3; return x + y; }";
+        let mut graph = compile_to_graph(src);
+        graph.constant_fold();
+        let has_seven = graph.nodes.iter().any(|n| n.node_type == NodeType::Const && n.value.as_deref() == Some("7"));
+        assert!(has_seven, "Constant folding should reduce 10-3 to 7");
+    }
+
+    #[test]
+    fn test_constant_fold_chain() {
+        let src = "module Test\ncircuit main(private x: Field) -> Field { let a = 2 + 3; let b = a * 4; return x + b; }";
+        let mut graph = compile_to_graph(src);
+        graph.constant_fold();
+        let has_20 = graph.nodes.iter().any(|n| n.node_type == NodeType::Const && n.value.as_deref() == Some("20"));
+        assert!(has_20, "Chained constant folding should reduce (2+3)*4 to 20");
+    }
+
+    // ========== Dead Code Elimination Tests ==========
+
+    #[test]
+    fn test_dce_removes_unused() {
+        let src = "module Test\ncircuit main(private x: Field) -> Field { let unused = 42; return x; }";
+        let mut graph = compile_to_graph(src);
+        let before_count = graph.nodes.len();
+        graph.dead_code_eliminate();
+        let after_count = graph.nodes.len();
+        assert!(after_count < before_count, "DCE should remove unused constant node (before={}, after={})", before_count, after_count);
+    }
+
+    #[test]
+    fn test_dce_preserves_asserts() {
+        let src = "module Test\ncircuit main(private x: Field) -> bool { assert x > 10; return true; }";
+        let mut graph = compile_to_graph(src);
+        graph.dead_code_eliminate();
+        // AssertEq nodes should survive DCE
+        let has_assert = graph.nodes.iter().any(|n| n.node_type == NodeType::AssertEq);
+        assert!(has_assert, "DCE should preserve AssertEq nodes");
+    }
+
+    #[test]
+    fn test_dce_preserves_output_deps() {
+        let src = "module Test\ncircuit main(private x: Field, private y: Field) -> Field { let z = x + y; return z; }";
+        let mut graph = compile_to_graph(src);
+        graph.dead_code_eliminate();
+        // x, y, and z(add node) should all survive
+        let has_add = graph.nodes.iter().any(|n| n.node_type == NodeType::Add);
+        assert!(has_add, "DCE should preserve Add node that feeds output");
+        let input_count = graph.nodes.iter().filter(|n| n.node_type == NodeType::Input).count();
+        assert_eq!(input_count, 2, "DCE should preserve both input nodes");
+    }
+
+    // ========== Information Flow Analysis Tests ==========
+
+    #[test]
+    fn test_info_flow_detects_secret_leak() {
+        // Private input returned directly = leak
+        let src = "module Test\ncircuit main(private secret: Field) -> Field { return secret; }";
+        let graph = compile_to_graph(src);
+        let diagnostics = graph.check_information_flow();
+        assert!(!diagnostics.is_empty(), "Should detect secret leaking to output");
+        assert!(diagnostics[0].contains("secret"), "Diagnostic should mention the leaking input name");
+    }
+
+    #[test]
+    fn test_info_flow_poseidon_is_safe() {
+        // Secret passed through poseidon hash = safe
+        let src = "module Test\ncircuit main(private secret: Field) -> Field { let h = poseidon(secret); return h; }";
+        let graph = compile_to_graph(src);
+        let diagnostics = graph.check_information_flow();
+        let leak_diagnostics: Vec<_> = diagnostics.iter().filter(|d| d.contains("leaks")).collect();
+        assert!(leak_diagnostics.is_empty(), "Poseidon should break secret propagation chain");
+    }
+
+    #[test]
+    fn test_info_flow_under_constrained() {
+        // Unused input = under-constrained warning
+        let src = "module Test\ncircuit main(private x: Field, private unused: Field) -> Field { return x; }";
+        let mut graph = compile_to_graph(src);
+        graph.dead_code_eliminate();
+        // After DCE, unused is removed, so we check before DCE
+        let graph2 = compile_to_graph(src);
+        let diagnostics = graph2.check_information_flow();
+        let under_constrained: Vec<_> = diagnostics.iter().filter(|d| d.contains("never referenced")).collect();
+        assert!(!under_constrained.is_empty(), "Should detect under-constrained signal 'unused'");
+    }
+
+    #[test]
+    fn test_info_flow_public_is_safe() {
+        // Public input returned = no leak
+        let src = "module Test\ncircuit main(public x: Field) -> Field { return x; }";
+        let graph = compile_to_graph(src);
+        let diagnostics = graph.check_information_flow();
+        let leak_diagnostics: Vec<_> = diagnostics.iter().filter(|d| d.contains("leaks")).collect();
+        assert!(leak_diagnostics.is_empty(), "Public input returned should not be flagged as leak");
+    }
+
+    // ========== Lowerer Tests ==========
+
+    #[test]
+    fn test_lower_arithmetic() {
+        let src = "module Test\ncircuit main(private a: Field, private b: Field) -> Field { return a * b + a; }";
+        let graph = compile_to_graph(src);
+        let has_mul = graph.nodes.iter().any(|n| n.node_type == NodeType::Mul);
+        let has_add = graph.nodes.iter().any(|n| n.node_type == NodeType::Add);
+        assert!(has_mul, "Should generate Mul node");
+        assert!(has_add, "Should generate Add node");
+        assert_eq!(graph.outputs.len(), 1, "Should have exactly 1 output");
+    }
+
+    #[test]
+    fn test_lower_comparison_generates_range_check() {
+        let src = "module Test\ncircuit main(private x: Field) -> bool { return x > 10; }";
+        let graph = compile_to_graph(src);
+        let has_range_check = graph.nodes.iter().any(|n| n.node_type == NodeType::RangeCheck);
+        assert!(has_range_check, "Comparison should generate RangeCheck node");
+    }
+
+    #[test]
+    fn test_lower_if_else_generates_select() {
+        let src = "module Test\ncircuit main(private x: Field) -> Field { let c = x > 5; let mut r = 0; if c { r = x; } return r; }";
+        let graph = compile_to_graph(src);
+        let has_select = graph.nodes.iter().any(|n| n.node_type == NodeType::Select);
+        assert!(has_select, "If-else should generate Select (MUX) node");
+    }
+
+    #[test]
+    fn test_lower_loop_unrolls() {
+        let src = "module Test\ncircuit main(private x: Field) -> Field { let mut sum = 0; for i in 0..4 { sum = sum + x; } return sum; }";
+        let graph = compile_to_graph(src);
+        // Loop of 4 iterations should produce 4 Add nodes
+        let add_count = graph.nodes.iter().filter(|n| n.node_type == NodeType::Add).count();
+        assert!(add_count >= 4, "Loop unrolling should generate at least 4 Add nodes, got {}", add_count);
+    }
+
+    #[test]
+    fn test_lower_equality_generates_is_zero() {
+        let src = "module Test\ncircuit main(private a: Field, private b: Field) -> bool { return a == b; }";
+        let graph = compile_to_graph(src);
+        let has_is_zero = graph.nodes.iter().any(|n| n.node_type == NodeType::IsZero);
+        assert!(has_is_zero, "Equality check should generate IsZero node via (a-b)");
+    }
+
+    #[test]
+    fn test_source_line_tracking() {
+        let src = "module Test\ncircuit main(private x: Field) -> Field {\n    let y = x + 1;\n    return y;\n}";
+        let graph = compile_to_graph(src);
+        let nodes_with_lines: Vec<_> = graph.nodes.iter().filter(|n| n.line.is_some()).collect();
+        assert!(!nodes_with_lines.is_empty(), "Lowerer should track source line numbers");
+    }
+
+    #[test]
+    fn test_cse_elimination() {
+        // Compute (a * b) + (a * b) -> The duplicate multiplication should be merged by CSE
+        let src = "module Test\ncircuit main(private a: Field, private b: Field) -> Field { return a * b + a * b; }";
+        let mut graph = compile_to_graph(src);
+        
+        let initial_mul_count = graph.nodes.iter().filter(|n| n.node_type == NodeType::Mul).count();
+        assert_eq!(initial_mul_count, 2, "Should have 2 multiplications initially");
+
+        graph.cse();
+
+        let cse_mul_count = graph.nodes.iter().filter(|n| n.node_type == NodeType::Mul).count();
+        assert_eq!(cse_mul_count, 1, "Should have exactly 1 multiplication node after CSE");
+    }
+
+    use proptest::prelude::*;
+    proptest! {
+        #[test]
+        fn test_fuzz_algebraic_simplify_add(x_val in 0..1000i128) {
+            let mut graph = Graph {
+                name: "FuzzAdd".to_string(),
+                nodes: Vec::new(),
+                outputs: Vec::new(),
+            };
+            let x_id = 0;
+            let zero_id = 1;
+            let add_id = 2;
+            graph.nodes.push(Node {
+                id: x_id,
+                node_type: NodeType::Input,
+                inputs: Vec::new(),
+                strategies: Vec::new(),
+                alpha: None,
+                value: Some(x_val.to_string()),
+                bits: None,
+                visibility: Some(Visibility::Private),
+                label: "x".to_string(),
+                line: None,
+            });
+            graph.nodes.push(Node {
+                id: zero_id,
+                node_type: NodeType::Const,
+                inputs: Vec::new(),
+                strategies: Vec::new(),
+                alpha: None,
+                value: Some("0".to_string()),
+                bits: None,
+                visibility: None,
+                label: "const_zero".to_string(),
+                line: None,
+            });
+            graph.nodes.push(Node {
+                id: add_id,
+                node_type: NodeType::Add,
+                inputs: vec![x_id, zero_id],
+                strategies: Vec::new(),
+                alpha: None,
+                value: None,
+                bits: None,
+                visibility: None,
+                label: "add".to_string(),
+                line: None,
+            });
+            graph.outputs.push(add_id);
+
+            graph.algebraic_simplify();
+            assert_eq!(graph.outputs[0], x_id, "x + 0 should simplify to x");
+        }
+
+        #[test]
+        fn test_fuzz_algebraic_simplify_mul_one(x_val in 0..1000i128) {
+            let mut graph = Graph {
+                name: "FuzzMulOne".to_string(),
+                nodes: Vec::new(),
+                outputs: Vec::new(),
+            };
+            let x_id = 0;
+            let one_id = 1;
+            let mul_id = 2;
+            graph.nodes.push(Node {
+                id: x_id,
+                node_type: NodeType::Input,
+                inputs: Vec::new(),
+                strategies: Vec::new(),
+                alpha: None,
+                value: Some(x_val.to_string()),
+                bits: None,
+                visibility: Some(Visibility::Private),
+                label: "x".to_string(),
+                line: None,
+            });
+            graph.nodes.push(Node {
+                id: one_id,
+                node_type: NodeType::Const,
+                inputs: Vec::new(),
+                strategies: Vec::new(),
+                alpha: None,
+                value: Some("1".to_string()),
+                bits: None,
+                visibility: None,
+                label: "const_one".to_string(),
+                line: None,
+            });
+            graph.nodes.push(Node {
+                id: mul_id,
+                node_type: NodeType::Mul,
+                inputs: vec![x_id, one_id],
+                strategies: Vec::new(),
+                alpha: None,
+                value: None,
+                bits: None,
+                visibility: None,
+                label: "mul".to_string(),
+                line: None,
+            });
+            graph.outputs.push(mul_id);
+
+            graph.algebraic_simplify();
+            assert_eq!(graph.outputs[0], x_id, "x * 1 should simplify to x");
+        }
+
+        #[test]
+        fn test_fuzz_algebraic_simplify_mul_zero(x_val in 0..1000i128) {
+            let mut graph = Graph {
+                name: "FuzzMulZero".to_string(),
+                nodes: Vec::new(),
+                outputs: Vec::new(),
+            };
+            let x_id = 0;
+            let zero_id = 1;
+            let mul_id = 2;
+            graph.nodes.push(Node {
+                id: x_id,
+                node_type: NodeType::Input,
+                inputs: Vec::new(),
+                strategies: Vec::new(),
+                alpha: None,
+                value: Some(x_val.to_string()),
+                bits: None,
+                visibility: Some(Visibility::Private),
+                label: "x".to_string(),
+                line: None,
+            });
+            graph.nodes.push(Node {
+                id: zero_id,
+                node_type: NodeType::Const,
+                inputs: Vec::new(),
+                strategies: Vec::new(),
+                alpha: None,
+                value: Some("0".to_string()),
+                bits: None,
+                visibility: None,
+                label: "const_zero".to_string(),
+                line: None,
+            });
+            graph.nodes.push(Node {
+                id: mul_id,
+                node_type: NodeType::Mul,
+                inputs: vec![x_id, zero_id],
+                strategies: Vec::new(),
+                alpha: None,
+                value: None,
+                bits: None,
+                visibility: None,
+                label: "mul".to_string(),
+                line: None,
+            });
+            graph.outputs.push(mul_id);
+
+            graph.algebraic_simplify();
+            assert_eq!(graph.outputs[0], zero_id, "x * 0 should simplify to 0");
+        }
+    }
 }

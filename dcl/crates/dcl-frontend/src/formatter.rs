@@ -79,6 +79,7 @@ fn format_type(ty: &Type) -> String {
     match ty {
         Type::Field => "Field".to_string(),
         Type::Bool => "bool".to_string(),
+        Type::Uint(bits) => format!("u{}", bits),
         Type::Struct(name) => name.clone(),
         Type::Array(inner, size) => format!("{}[{}]", format_type(inner), size),
     }
