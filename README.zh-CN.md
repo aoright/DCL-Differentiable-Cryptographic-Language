@@ -51,7 +51,7 @@ b * inv_div_node_id === 1;
 n_node_id <-- a / b;
 n_node_id * b === a;
 ```
-如果除数 $b$ 为零，约束 $b \cdot \text{inv\_div\_node\_id} \equiv 1$ 将无法通过，从而在约束层面安全地拦截了除以零行为。
+如果除数 `b` 为零，约束 `b * inv_div_node_id === 1` 将无法通过，从而在约束层面安全地拦截了除以零行为。
 
 ### 6. 前端诊断恢复 (Diagnostic Recovery)
 编译器前端的语法解析器和类型检查器支持诊断恢复机制：

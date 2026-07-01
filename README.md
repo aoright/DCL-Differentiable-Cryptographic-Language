@@ -51,7 +51,7 @@ b * inv_div_node_id === 1;
 n_node_id <-- a / b;
 n_node_id * b === a;
 ```
-If the divisor $b$ is zero, the constraint $b \cdot \text{inv\_div\_node\_id} \equiv 1$ fails, ensuring that division by zero is safely blocked at the constraint level.
+If the divisor `b` is zero, the constraint `b * inv_div_node_id === 1` fails, ensuring that division by zero is safely blocked at the constraint level.
 
 ### 6. Diagnostic Recovery in Frontend
 The parser and type checker support diagnostic recovery:
