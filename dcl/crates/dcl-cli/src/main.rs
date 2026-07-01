@@ -172,6 +172,7 @@ fn run_compile(input_path: &str, output_path: &str, backend: &str, epochs: usize
 
     let mut lowerer = Lowerer::new(&module);
     let graph = lowerer.lower_circuit(circuit)?;
+    graph.check_information_flow();
 
     // Save temporary IR file for optimizer
     let temp_dir = std::env::temp_dir();

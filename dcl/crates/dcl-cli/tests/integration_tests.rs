@@ -459,8 +459,10 @@ fn test_if_else_compilation() {
             let mut res = 0;
             if cond {
                 res = x;
+                assert x > 10;
             } else {
                 res = y;
+                assert y > 20;
             }
             return res;
         }
@@ -480,6 +482,10 @@ fn test_if_else_compilation() {
     // Verify a Select node was generated for merging the environments
     let has_select = graph.nodes.iter().any(|node| node.node_type == dcl_ir::NodeType::Select);
     assert!(has_select, "Lowering did not generate a Select node for If statement merge");
+
+    // Verify AssertEq nodes are present
+    let assert_count = graph.nodes.iter().filter(|node| node.node_type == dcl_ir::NodeType::AssertEq).count();
+    assert!(assert_count >= 2, "Should have at least 2 AssertEq nodes for conditional assertions");
 
     let codegen = CodeGenerator::new(graph);
     let circom_code = codegen.generate_circom().unwrap();

@@ -120,6 +120,9 @@ fn format_stmt(stmt: &Stmt, indent: usize) -> String {
             s.push_str(&format!("{}}}\n", spaces));
             s
         }
+        Stmt::ExprStmt(expr, _) => {
+            format!("{}{};\n", spaces, format_expr(expr))
+        }
     }
 }
 
@@ -161,6 +164,7 @@ fn format_expr(expr: &Expr) -> String {
         Expr::Unary(op, inner, _) => {
             let op_str = match op {
                 UnOp::Not => "!",
+                UnOp::Neg => "-",
             };
             format!("{}{}", op_str, format_expr(inner))
         }

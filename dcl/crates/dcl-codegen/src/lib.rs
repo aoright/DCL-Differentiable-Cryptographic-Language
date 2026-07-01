@@ -76,7 +76,11 @@ impl CodeGenerator {
                 NodeType::Div => {
                     let a = self.wire_name(node.inputs[0]);
                     let b = self.wire_name(node.inputs[1]);
-                    // In Circom: a / b is constrained as: n_id * b === a
+                    // Secure division by zero: enforce divisor b != 0 using an inverse signal constraint
+                    code.push_str(&format!("    signal inv_div_{};\n", node.id));
+                    code.push_str(&format!("    inv_div_{} <-- {} == 0 ? 0 : 1 / {};\n", node.id, b, b));
+                    code.push_str(&format!("    {} * inv_div_{} === 1;\n", b, node.id));
+                    // Constrain division output
                     code.push_str(&format!("    n_{} <-- {} / {};\n", node.id, a, b));
                     code.push_str(&format!("    n_{} * {} === {};\n", node.id, b, a));
                 }

@@ -58,12 +58,95 @@ pub struct Graph {
     pub outputs: Vec<usize>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Secrecy {
+    Public,
+    Secret,
+}
+
+impl Graph {
+    pub fn check_information_flow(&self) {
+        let mut secrecy: HashMap<usize, Secrecy> = HashMap::new();
+
+        // 1. Traverse nodes and compute secrecy status
+        for node in &self.nodes {
+            let node_secrecy = match node.node_type {
+                NodeType::Input => {
+                    if node.visibility == Some(Visibility::Private) {
+                        Secrecy::Secret
+                    } else {
+                        Secrecy::Public
+                    }
+                }
+                NodeType::Const => Secrecy::Public,
+                NodeType::Poseidon => Secrecy::Public, // poseidon is a secure one-way hash
+                _ => {
+                    // For all other operations, if any input is secret, the output is secret
+                    let mut is_secret = false;
+                    for &inp in &node.inputs {
+                        if secrecy.get(&inp) == Some(&Secrecy::Secret) {
+                            is_secret = true;
+                            break;
+                        }
+                    }
+                    if is_secret {
+                        Secrecy::Secret
+                    } else {
+                        Secrecy::Public
+                    }
+                }
+            };
+            secrecy.insert(node.id, node_secrecy);
+        }
+
+        // 2. Check outputs
+        let mut leaking_inputs = std::collections::HashSet::new();
+        for &out_id in &self.outputs {
+            if secrecy.get(&out_id) == Some(&Secrecy::Secret) {
+                // Trace back to find secret inputs
+                self.trace_secret_inputs(out_id, &secrecy, &mut leaking_inputs);
+            }
+        }
+
+        if !leaking_inputs.is_empty() {
+            let mut inputs_vec: Vec<String> = leaking_inputs.into_iter().collect();
+            inputs_vec.sort();
+            eprintln!(
+                "⚠️  [Security Warning]: Private secret from input(s) '{}' leaks directly to public output in circuit '{}'. Consider passing secrets through a one-way hash function (like poseidon) before exporting.",
+                inputs_vec.join(", "),
+                self.name
+            );
+        }
+    }
+
+    fn trace_secret_inputs(&self, node_id: usize, secrecy: &HashMap<usize, Secrecy>, leaking: &mut std::collections::HashSet<String>) {
+        let node = match self.nodes.iter().find(|n| n.id == node_id) {
+            Some(n) => n,
+            None => return,
+        };
+
+        if node.node_type == NodeType::Input {
+            if node.visibility == Some(Visibility::Private) {
+                leaking.insert(node.label.clone());
+            }
+            return;
+        }
+
+        for &inp in &node.inputs {
+            if secrecy.get(&inp) == Some(&Secrecy::Secret) {
+                self.trace_secret_inputs(inp, secrecy, leaking);
+            }
+        }
+    }
+}
+
 pub struct Lowerer {
     nodes: Vec<Node>,
     next_id: usize,
     env: HashMap<String, usize>, // maps variable name to node ID
     struct_defs: HashMap<String, ast::StructDef>,
     circuits: HashMap<String, ast::Circuit>,
+    condition_stack: Vec<usize>,
 }
 
 impl Lowerer {
@@ -82,6 +165,7 @@ impl Lowerer {
             env: HashMap::new(),
             struct_defs,
             circuits,
+            condition_stack: Vec::new(),
         }
     }
 
@@ -127,6 +211,7 @@ impl Lowerer {
         self.nodes.clear();
         self.next_id = 0;
         self.env.clear();
+        self.condition_stack.clear();
 
         // 1. Lower parameters. Since struct arguments are flattened, we register each leaf field as an input.
         for param in &circuit.params {
@@ -158,19 +243,21 @@ impl Lowerer {
             }
             Stmt::Assert(expr, _) => {
                 let expr_id = self.lower_expr(expr)?;
-                let true_id = self.alloc_id();
-                self.nodes.push(Node {
-                    id: true_id,
-                    node_type: NodeType::Const,
-                    inputs: Vec::new(),
-                    strategies: Vec::new(),
-                    alpha: None,
-                    value: Some("1".to_string()),
-                    bits: None,
-                    visibility: None,
-                    label: "const_true".to_string(),
-                });
-                self.add_node(NodeType::AssertEq, vec![expr_id, true_id], format!("assert_eq_{}", expr_id));
+                if self.condition_stack.is_empty() {
+                    let true_id = self.add_const_node("1".to_string(), "const_true".to_string());
+                    self.add_node(NodeType::AssertEq, vec![expr_id, true_id], format!("assert_eq_{}", expr_id));
+                } else {
+                    let mut p = self.condition_stack[0];
+                    for i in 1..self.condition_stack.len() {
+                        let c = self.condition_stack[i];
+                        p = self.add_node(NodeType::Mul, vec![p, c], format!("path_cond_step_{}_{}", p, c));
+                    }
+                    let one_id = self.add_const_node("1".to_string(), "const_1".to_string());
+                    let not_expr_id = self.add_node(NodeType::Sub, vec![one_id, expr_id], format!("not_assert_expr_{}", expr_id));
+                    let assert_val_id = self.add_node(NodeType::Mul, vec![p, not_expr_id], format!("assert_cond_val_{}", expr_id));
+                    let zero_id = self.add_const_node("0".to_string(), "const_0".to_string());
+                    self.add_node(NodeType::AssertEq, vec![assert_val_id, zero_id], format!("assert_eq_zero_{}", expr_id));
+                }
             }
             Stmt::Assign(lhs, rhs, _) => {
                 let rhs_id = self.lower_expr(rhs)?;
@@ -215,17 +302,23 @@ impl Lowerer {
                 let original_env = self.env.clone();
 
                 // 1. Lower then branch
+                self.condition_stack.push(cond_id);
                 for s in then_body {
                     self.lower_statement(s, outputs)?;
                 }
+                self.condition_stack.pop();
                 let then_env = self.env.clone();
 
                 // 2. Lower else branch
                 self.env = original_env.clone();
                 if let Some(else_stmts) = else_body {
+                    let one_id = self.add_const_node("1".to_string(), "const_1".to_string());
+                    let not_cond_id = self.add_node(NodeType::Sub, vec![one_id, cond_id], "not_cond".to_string());
+                    self.condition_stack.push(not_cond_id);
                     for s in else_stmts {
                         self.lower_statement(s, outputs)?;
                     }
+                    self.condition_stack.pop();
                 }
                 let else_env = self.env.clone();
 
@@ -255,6 +348,9 @@ impl Lowerer {
                     }
                 }
                 self.env = merged_env;
+            }
+            Stmt::ExprStmt(expr, _) => {
+                self.lower_expr(expr)?;
             }
         }
         Ok(())
@@ -453,6 +549,12 @@ impl Lowerer {
                 });
                 let not_id = self.add_node(NodeType::Sub, vec![one_id, val_id], format!("logical_not_{}", val_id));
                 Ok(not_id)
+            }
+            Expr::Unary(ast::UnOp::Neg, inner, _) => {
+                let val_id = self.lower_expr(inner)?;
+                let zero_id = self.add_const_node("0".to_string(), "const_0".to_string());
+                let neg_id = self.add_node(NodeType::Sub, vec![zero_id, val_id], format!("neg_{}", val_id));
+                Ok(neg_id)
             }
             Expr::Access(_, _, _) => {
                 let path = self.resolve_path(expr)?;

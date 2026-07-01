@@ -1,14 +1,24 @@
+//! Recursive-descent parser for the DCL language.
+//!
+//! Converts a token stream into an AST [`Module`]. Supports error recovery
+//! via synchronization to `}` and `;` boundaries, allowing multiple parse
+//! errors to be reported in a single compilation run.
+
 use crate::ast::*;
 use crate::lexer::{Token, TokenWithSpan};
 
+/// Parser state holding the token stream and current position.
 pub struct Parser {
     tokens: Vec<TokenWithSpan>,
     pos: usize,
+    /// Accumulated parse errors (enables error recovery).
+    pub errors: Vec<String>,
 }
 
 impl Parser {
+    /// Create a new parser for the given token stream.
     pub fn new(tokens: Vec<TokenWithSpan>) -> Self {
-        Self { tokens, pos: 0 }
+        Self { tokens, pos: 0, errors: Vec::new() }
     }
 
     fn peek(&self) -> Option<&Token> {
@@ -43,7 +53,25 @@ impl Parser {
         let span = self.peek_span();
         match self.next_token() {
             Some(tok) if tok == expected => Ok(()),
-            other => Err(format!("[Error at line {}, col {}]: Expected {:?}, found {:?}", span.line, span.col, expected, other)),
+            other => Err(format!("[Error at line {}, col {}]: Expected {:?}, found {:?}", span.line(), span.col(), expected, other)),
+        }
+    }
+
+    /// Synchronize parser after an error — skip tokens until a recovery point.
+    fn synchronize(&mut self) {
+        while let Some(tok) = self.peek() {
+            match tok {
+                Token::RBrace | Token::Semicolon => {
+                    self.next_token();
+                    return;
+                }
+                Token::Circuit | Token::Type | Token::Use | Token::Extern => {
+                    return; // Don't consume — let the caller handle it
+                }
+                _ => {
+                    self.next_token();
+                }
+            }
         }
     }
 
@@ -57,8 +85,8 @@ impl Parser {
                 let span = self.peek_span();
                 let len_tok = self.next_token().ok_or("Expected array size")?;
                 let len = match len_tok {
-                    Token::Num(s) => s.parse::<usize>().map_err(|_| format!("[Error at line {}, col {}]: Invalid array size: {}", span.line, span.col, s))?,
-                    other => return Err(format!("[Error at line {}, col {}]: Expected number for array size, found {:?}", span.line, span.col, other)),
+                    Token::Num(s) => s.parse::<usize>().map_err(|_| format!("[Error at line {}, col {}]: Invalid array size: {}", span.line(), span.col(), s))?,
+                    other => return Err(format!("[Error at line {}, col {}]: Expected number for array size, found {:?}", span.line(), span.col(), other)),
                 };
                 self.expect(Token::RBracket)?;
                 Ok(Type::Array(Box::new(inner_ty), len))
@@ -70,7 +98,7 @@ impl Parser {
                     Token::FieldTy => Type::Field,
                     Token::BoolTy => Type::Bool,
                     Token::Ident(name) => Type::Struct(name),
-                    other => return Err(format!("[Error at line {}, col {}]: Expected type keyword or identifier, found {:?}", span.line, span.col, other)),
+                    other => return Err(format!("[Error at line {}, col {}]: Expected type keyword or identifier, found {:?}", span.line(), span.col(), other)),
                 };
 
                 if self.peek() == Some(&Token::LBracket) {
@@ -78,8 +106,8 @@ impl Parser {
                     let len_span = self.peek_span();
                     let len_tok = self.next_token().ok_or("Expected array size")?;
                     let len = match len_tok {
-                        Token::Num(s) => s.parse::<usize>().map_err(|_| format!("[Error at line {}, col {}]: Invalid array size: {}", len_span.line, len_span.col, s))?,
-                        other => return Err(format!("[Error at line {}, col {}]: Expected number for array size, found {:?}", len_span.line, len_span.col, other)),
+                        Token::Num(s) => s.parse::<usize>().map_err(|_| format!("[Error at line {}, col {}]: Invalid array size: {}", len_span.line(), len_span.col(), s))?,
+                        other => return Err(format!("[Error at line {}, col {}]: Expected number for array size, found {:?}", len_span.line(), len_span.col(), other)),
                     };
                     self.expect(Token::RBracket)?;
                     Ok(Type::Array(Box::new(base_ty), len))
@@ -90,6 +118,7 @@ impl Parser {
         }
     }
 
+    /// Parse a complete DCL module from the token stream.
     pub fn parse_module(&mut self) -> Result<Module, String> {
         self.expect(Token::Module)?;
         let mut path = Vec::new();
@@ -97,7 +126,7 @@ impl Parser {
         let name_tok = self.next_token().ok_or("Expected module name")?;
         match name_tok {
             Token::Ident(name) => path.push(name),
-            other => return Err(format!("[Error at line {}, col {}]: Expected module identifier, found {:?}", span.line, span.col, other)),
+            other => return Err(format!("[Error at line {}, col {}]: Expected module identifier, found {:?}", span.line(), span.col(), other)),
         }
         while self.peek() == Some(&Token::DoubleColon) {
             self.next_token(); // consume '::'
@@ -105,12 +134,11 @@ impl Parser {
             let next_tok = self.next_token().ok_or("Expected identifier after '::'")?;
             match next_tok {
                 Token::Ident(name) => path.push(name),
-                other => return Err(format!("[Error at line {}, col {}]: Expected identifier, found {:?}", next_span.line, next_span.col, other)),
+                other => return Err(format!("[Error at line {}, col {}]: Expected identifier, found {:?}", next_span.line(), next_span.col(), other)),
             }
         }
         let module_name = path.join("::");
 
-        // Note: semicolon at end of module name might be optional or omitted.
         if self.peek() == Some(&Token::Semicolon) {
             self.next_token();
         }
@@ -128,7 +156,7 @@ impl Parser {
                     let first_tok = self.next_token().ok_or("Expected identifier in import path")?;
                     match first_tok {
                         Token::Ident(name) => path.push(name),
-                        other => return Err(format!("[Error at line {}, col {}]: Expected identifier, found {:?}", first_span.line, first_span.col, other)),
+                        other => return Err(format!("[Error at line {}, col {}]: Expected identifier, found {:?}", first_span.line(), first_span.col(), other)),
                     }
                     while self.peek() == Some(&Token::DoubleColon) {
                         self.next_token(); // consume '::'
@@ -136,7 +164,7 @@ impl Parser {
                         let next_tok = self.next_token().ok_or("Expected identifier after '::'")?;
                         match next_tok {
                             Token::Ident(name) => path.push(name),
-                            other => return Err(format!("[Error at line {}, col {}]: Expected identifier, found {:?}", next_span.line, next_span.col, other)),
+                            other => return Err(format!("[Error at line {}, col {}]: Expected identifier, found {:?}", next_span.line(), next_span.col(), other)),
                         }
                     }
                     if self.peek() == Some(&Token::Semicolon) {
@@ -146,8 +174,13 @@ impl Parser {
                 }
                 Token::Type => {
                     self.next_token(); // consume 'type'
-                    let struct_def = self.parse_struct_def()?;
-                    types.push(struct_def);
+                    match self.parse_struct_def() {
+                        Ok(struct_def) => types.push(struct_def),
+                        Err(e) => {
+                            self.errors.push(e);
+                            self.synchronize();
+                        }
+                    }
                 }
                 Token::Circuit | Token::Extern => {
                     let is_extern = if self.peek() == Some(&Token::Extern) {
@@ -157,11 +190,20 @@ impl Parser {
                         false
                     };
                     self.expect(Token::Circuit)?;
-                    let circuit = self.parse_circuit(is_extern)?;
-                    circuits.push(circuit);
+                    match self.parse_circuit(is_extern) {
+                        Ok(circuit) => circuits.push(circuit),
+                        Err(e) => {
+                            self.errors.push(e);
+                            self.synchronize();
+                        }
+                    }
                 }
-                other => return Err(format!("[Error at line {}, col {}]: Expected 'use', 'type', 'extern', or 'circuit', found {:?}", self.peek_span().line, self.peek_span().col, other)),
+                other => return Err(format!("[Error at line {}, col {}]: Expected 'use', 'type', 'extern', or 'circuit', found {:?}", self.peek_span().line(), self.peek_span().col(), other)),
             }
+        }
+
+        if !self.errors.is_empty() {
+            return Err(self.errors.join("\n"));
         }
 
         Ok(Module {
@@ -177,7 +219,7 @@ impl Parser {
         let name_tok = self.next_token().ok_or("Expected struct name")?;
         let name = match name_tok {
             Token::Ident(n) => n,
-            other => return Err(format!("[Error at line {}, col {}]: Expected struct identifier, found {:?}", span.line, span.col, other)),
+            other => return Err(format!("[Error at line {}, col {}]: Expected struct identifier, found {:?}", span.line(), span.col(), other)),
         };
 
         self.expect(Token::Eq)?;
@@ -189,7 +231,7 @@ impl Parser {
             let field_name_tok = self.next_token().ok_or("Expected field name")?;
             let field_name = match field_name_tok {
                 Token::Ident(n) => n,
-                other => return Err(format!("[Error at line {}, col {}]: Expected field identifier, found {:?}", field_span.line, field_span.col, other)),
+                other => return Err(format!("[Error at line {}, col {}]: Expected field identifier, found {:?}", field_span.line(), field_span.col(), other)),
             };
 
             self.expect(Token::Colon)?;
@@ -200,7 +242,7 @@ impl Parser {
             if self.peek() == Some(&Token::Comma) {
                 self.next_token();
             } else if self.peek() != Some(&Token::RBrace) {
-                return Err(format!("[Error at line {}, col {}]: Expected ',' or '}}', found {:?}", self.peek_span().line, self.peek_span().col, self.peek()));
+                return Err(format!("[Error at line {}, col {}]: Expected ',' or '}}', found {:?}", self.peek_span().line(), self.peek_span().col(), self.peek()));
             }
         }
         self.expect(Token::RBrace)?;
@@ -213,7 +255,7 @@ impl Parser {
         let name_tok = self.next_token().ok_or("Expected circuit name")?;
         let name = match name_tok {
             Token::Ident(n) => n,
-            other => return Err(format!("[Error at line {}, col {}]: Expected circuit identifier, found {:?}", span.line, span.col, other)),
+            other => return Err(format!("[Error at line {}, col {}]: Expected circuit identifier, found {:?}", span.line(), span.col(), other)),
         };
 
         self.expect(Token::LParen)?;
@@ -239,7 +281,7 @@ impl Parser {
             let param_name_tok = self.next_token().ok_or("Expected parameter name")?;
             let param_name = match param_name_tok {
                 Token::Ident(n) => n,
-                other => return Err(format!("[Error at line {}, col {}]: Expected parameter identifier, found {:?}", param_span.line, param_span.col, other)),
+                other => return Err(format!("[Error at line {}, col {}]: Expected parameter identifier, found {:?}", param_span.line(), param_span.col(), other)),
             };
 
             self.expect(Token::Colon)?;
@@ -254,7 +296,7 @@ impl Parser {
             if self.peek() == Some(&Token::Comma) {
                 self.next_token();
             } else if self.peek() != Some(&Token::RParen) {
-                return Err(format!("[Error at line {}, col {}]: Expected ',' or ')', found {:?}", self.peek_span().line, self.peek_span().col, self.peek()));
+                return Err(format!("[Error at line {}, col {}]: Expected ',' or ')', found {:?}", self.peek_span().line(), self.peek_span().col(), self.peek()));
             }
         }
         self.expect(Token::RParen)?;
@@ -271,8 +313,13 @@ impl Parser {
             self.expect(Token::LBrace)?;
             let mut body = Vec::new();
             while self.peek() != Some(&Token::RBrace) {
-                let stmt = self.parse_statement()?;
-                body.push(stmt);
+                match self.parse_statement() {
+                    Ok(stmt) => body.push(stmt),
+                    Err(e) => {
+                        self.errors.push(e);
+                        self.synchronize();
+                    }
+                }
             }
             self.expect(Token::RBrace)?;
             body
@@ -303,7 +350,7 @@ impl Parser {
                 let var_name_tok = self.next_token().ok_or("Expected variable name")?;
                 let var_name = match var_name_tok {
                     Token::Ident(n) => n,
-                    other => return Err(format!("[Error at line {}, col {}]: Expected identifier after 'let', found {:?}", var_span.line, var_span.col, other)),
+                    other => return Err(format!("[Error at line {}, col {}]: Expected identifier after 'let', found {:?}", var_span.line(), var_span.col(), other)),
                 };
 
                 let mut var_ty = None;
@@ -332,7 +379,7 @@ impl Parser {
                 let var_tok = self.next_token().ok_or("Expected loop variable name")?;
                 let var_name = match var_tok {
                     Token::Ident(n) => n,
-                    other => return Err(format!("[Error at line {}, col {}]: Expected loop variable identifier, found {:?}", var_span.line, var_span.col, other)),
+                    other => return Err(format!("[Error at line {}, col {}]: Expected loop variable identifier, found {:?}", var_span.line(), var_span.col(), other)),
                 };
                 self.expect(Token::In)?;
                 let start_expr = self.parse_expr()?;
@@ -373,7 +420,7 @@ impl Parser {
                         let stmt = self.parse_statement()?;
                         else_body = Some(vec![stmt]);
                     } else {
-                        return Err(format!("[Error at line {}, col {}]: Expected '{{' or 'if' after 'else'", self.peek_span().line, self.peek_span().col));
+                        return Err(format!("[Error at line {}, col {}]: Expected '{{' or 'if' after 'else'", self.peek_span().line(), self.peek_span().col()));
                     }
                 }
 
@@ -386,7 +433,8 @@ impl Parser {
                     let rhs = self.parse_expr()?;
                     Stmt::Assign(Box::new(lhs), rhs, span)
                 } else {
-                    return Err(format!("[Error at line {}, col {}]: Expected statement, found {:?}", span.line, span.col, tok));
+                    // Expression statement (e.g., function call without assignment)
+                    Stmt::ExprStmt(lhs, span)
                 }
             }
         };
@@ -403,7 +451,7 @@ impl Parser {
     }
 
     fn parse_binary_expr(&mut self, min_prec: i8) -> Result<Expr, String> {
-        let mut lhs = self.parse_primary_expr()?;
+        let mut lhs = self.parse_unary_expr()?;
 
         while let Some(tok) = self.peek() {
             let op = match tok {
@@ -429,8 +477,8 @@ impl Parser {
 
             self.next_token(); // consume operator
             let rhs = self.parse_binary_expr(prec + 1)?;
-            let span = lhs.span();
-            lhs = Expr::Binary(op, Box::new(lhs), Box::new(rhs), span);
+            let merged_span = lhs.span().merge(&rhs.span());
+            lhs = Expr::Binary(op, Box::new(lhs), Box::new(rhs), merged_span);
         }
 
         Ok(lhs)
@@ -442,6 +490,26 @@ impl Parser {
             BinOp::Eq | BinOp::NotEq | BinOp::Gte | BinOp::Lte | BinOp::Lt | BinOp::Gt => 1,
             BinOp::Add | BinOp::Sub => 2,
             BinOp::Mul | BinOp::Div => 3,
+        }
+    }
+
+    /// Parse a unary expression: `!expr` or `-expr` or primary.
+    fn parse_unary_expr(&mut self) -> Result<Expr, String> {
+        let span = self.peek_span();
+        match self.peek() {
+            Some(Token::Not) => {
+                self.next_token();
+                let inner = self.parse_unary_expr()?;
+                let merged = span.merge(&inner.span());
+                Ok(Expr::Unary(UnOp::Not, Box::new(inner), merged))
+            }
+            Some(Token::Minus) => {
+                self.next_token();
+                let inner = self.parse_unary_expr()?;
+                let merged = span.merge(&inner.span());
+                Ok(Expr::Unary(UnOp::Neg, Box::new(inner), merged))
+            }
+            _ => self.parse_primary_expr(),
         }
     }
 
@@ -458,7 +526,7 @@ impl Parser {
                     let next_tok = self.next_token().ok_or("Expected identifier after '::'")?;
                     match next_tok {
                         Token::Ident(n) => path.push(n),
-                        other => return Err(format!("[Error at line {}, col {}]: Expected identifier, found {:?}", next_span.line, next_span.col, other)),
+                        other => return Err(format!("[Error at line {}, col {}]: Expected identifier, found {:?}", next_span.line(), next_span.col(), other)),
                     }
                 }
 
@@ -471,7 +539,7 @@ impl Parser {
                         if self.peek() == Some(&Token::Comma) {
                             self.next_token();
                         } else if self.peek() != Some(&Token::RParen) {
-                            return Err(format!("[Error at line {}, col {}]: Expected ',' or ')', found {:?}", self.peek_span().line, self.peek_span().col, self.peek()));
+                            return Err(format!("[Error at line {}, col {}]: Expected ',' or ')', found {:?}", self.peek_span().line(), self.peek_span().col(), self.peek()));
                         }
                     }
                     self.expect(Token::RParen)?;
@@ -481,10 +549,6 @@ impl Parser {
                     Expr::Var(joined_name, span)
                 }
             }
-            Token::Not => {
-                let inner = self.parse_primary_expr()?;
-                Expr::Unary(crate::ast::UnOp::Not, Box::new(inner), span)
-            }
             Token::Num(val) => Expr::ConstField(val, span),
             Token::Bool(val) => Expr::ConstBool(val, span),
             Token::LParen => {
@@ -492,10 +556,10 @@ impl Parser {
                 self.expect(Token::RParen)?;
                 e
             }
-            other => return Err(format!("[Error at line {}, col {}]: Unexpected token in expression: {:?}", span.line, span.col, other)),
+            other => return Err(format!("[Error at line {}, col {}]: Unexpected token in expression: {:?}", span.line(), span.col(), other)),
         };
 
-        // Check for field access like x.y or array indexing (which we can treat as access/indexing)
+        // Post-fix: field access and array indexing
         while self.peek() == Some(&Token::Dot) || self.peek() == Some(&Token::LBracket) {
             let current_span = expr.span();
             if self.peek() == Some(&Token::Dot) {
@@ -504,14 +568,16 @@ impl Parser {
                 let field_tok = self.next_token().ok_or("Expected field identifier after '.'")?;
                 let field_name = match field_tok {
                     Token::Ident(n) => n,
-                    other => return Err(format!("[Error at line {}, col {}]: Expected field identifier, found {:?}", field_span.line, field_span.col, other)),
+                    other => return Err(format!("[Error at line {}, col {}]: Expected field identifier, found {:?}", field_span.line(), field_span.col(), other)),
                 };
-                expr = Expr::Access(Box::new(expr), field_name, current_span);
+                let merged = current_span.merge(&field_span);
+                expr = Expr::Access(Box::new(expr), field_name, merged);
             } else {
                 self.next_token(); // consume '['
                 let idx_expr = self.parse_expr()?;
                 self.expect(Token::RBracket)?;
-                expr = Expr::Index(Box::new(expr), Box::new(idx_expr), current_span);
+                let merged = current_span.merge(&self.peek_span());
+                expr = Expr::Index(Box::new(expr), Box::new(idx_expr), merged);
             }
         }
 
@@ -538,5 +604,31 @@ mod tests {
         assert_eq!(circuit.params.len(), 1);
         assert_eq!(circuit.params[0].name, "x");
         assert_eq!(circuit.params[0].visibility, Visibility::Private);
+    }
+
+    #[test]
+    fn test_unary_negation() {
+        let input = "module Test\ncircuit main(private x: Field) -> Field { return -x; }";
+        let mut lexer = Lexer::new(input);
+        let tokens = lexer.tokenize().unwrap();
+        let mut parser = Parser::new(tokens);
+        let module = parser.parse_module().unwrap();
+        let circuit = &module.circuits[0];
+        match &circuit.body[0] {
+            Stmt::Return(Expr::Unary(UnOp::Neg, _, _), _) => {}
+            other => panic!("Expected Unary Neg return, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_expression_statement() {
+        let input = "module Test\ncircuit main(private x: Field) -> Field { my_func(x); return x; }";
+        let mut lexer = Lexer::new(input);
+        let tokens = lexer.tokenize().unwrap();
+        let mut parser = Parser::new(tokens);
+        // This will parse but type-check will catch the unknown function
+        let module = parser.parse_module().unwrap();
+        let circuit = &module.circuits[0];
+        assert!(matches!(&circuit.body[0], Stmt::ExprStmt(Expr::Call(_, _, _), _)));
     }
 }
