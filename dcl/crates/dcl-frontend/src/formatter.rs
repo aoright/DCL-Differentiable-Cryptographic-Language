@@ -1,5 +1,11 @@
+//! Pretty-printer / code formatter for the DCL language.
+//!
+//! Produces canonical, consistently-indented source text from a parsed AST.
+//! Handles operator precedence for minimal parenthesization.
+
 use crate::ast::{Module, StructDef, Circuit, Stmt, Expr, BinOp, UnOp, Type};
 
+/// Format an entire module into canonical DCL source text.
 pub fn format_module(module: &Module) -> String {
     let mut s = String::new();
 
@@ -166,7 +172,13 @@ fn format_expr(expr: &Expr) -> String {
                 UnOp::Not => "!",
                 UnOp::Neg => "-",
             };
-            format!("{}{}", op_str, format_expr(inner))
+            let inner_str = format_expr(inner);
+            // Add parens if inner is binary for clarity
+            if matches!(inner.as_ref(), Expr::Binary(_, _, _, _)) {
+                format!("{}({})", op_str, inner_str)
+            } else {
+                format!("{}{}", op_str, inner_str)
+            }
         }
         Expr::Binary(op, lhs, rhs, _) => {
             let parent_prec = op_precedence(op);
